@@ -1,8 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { DEFAULT_MODEL_ID, MODELS } from "./models";
-import { calculateMiniMaxM3Weight } from "./weight-model";
+import { DEFAULT_MODEL_ID, MODELS, isDeepseekV4Profile } from "./models";
+import {
+  calculateDeepseekV4Weight,
+  calculateMiniMaxM3Weight,
+  isDeepseekV4Breakdown,
+} from "./weight-model";
 
 type Inputs = {
   maxBatchedTokens: number;
@@ -12,6 +16,7 @@ type Inputs = {
   graphCount: number;
   cannGB: number;
   enableSharedExpertTp: boolean;
+  mtpLayers: number;
 };
 
 const DEFAULTS: Inputs = {
@@ -22,6 +27,7 @@ const DEFAULTS: Inputs = {
   graphCount: 5,
   cannGB: 1,
   enableSharedExpertTp: false,
+  mtpLayers: 1,
 };
 
 const GB = 1_000_000_000;
@@ -61,6 +67,7 @@ export default function Home() {
   const families = Array.from(new Set(MODELS.map((item) => item.family)));
   const [family, setFamily] = useState(model.family);
   const familyModels = MODELS.filter((item) => item.family === family);
+  const isV4 = Boolean(model.weightProfile && isDeepseekV4Profile(model.weightProfile));
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
   const localExpertNum = model.expertCount / epSize;
 
@@ -91,27 +98,55 @@ export default function Home() {
     const deviceOS = 4.25 * GIB;
     const profile = model.weightProfile;
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
+    const paddedVocab = profile ? align(profile.vocabSize, profile.vocabPaddingSize) : 0;
+    const isV4 = Boolean(profile && isDeepseekV4Profile(profile));
     const weightConfigValid = Boolean(
       profile
       && model.expertCount % ep === 0
       && profile.attentionHeads % tp === 0
-      && profile.kvHeads % tp === 0
-      && profile.indexerHeads % tp === 0
-      && profile.denseIntermediateSize % tp === 0
-      && (!inputs.enableSharedExpertTp || profile.expertIntermediateSize % tp === 0)
+      && (isV4
+        ? (profile.oGroups ?? 0) % tp === 0
+          && profile.expertIntermediateSize % tp === 0
+          && paddedVocab % tp === 0
+        : profile.kvHeads % tp === 0
+          && profile.indexerHeads % tp === 0
+          && profile.denseIntermediateSize % tp === 0
+          && (!inputs.enableSharedExpertTp || profile.expertIntermediateSize % tp === 0))
     );
 
     let weight = 0;
+    let fullWeight = 0;
     let weightBreakdown = null;
     if (profile && weightConfigValid) {
-      weightBreakdown = calculateMiniMaxM3Weight({
-        profile,
-        hiddenSize: H,
-        expertCount: model.expertCount,
-        tpSize: tp,
-        epSize: ep,
-        enableSharedExpertTp: inputs.enableSharedExpertTp,
-      });
+      if (isV4) {
+        weightBreakdown = calculateDeepseekV4Weight({
+          profile,
+          hiddenSize: H,
+          expertCount: model.expertCount,
+          topK: model.topK,
+          tpSize: tp,
+          epSize: ep,
+          mtpLayers: Math.floor(safe(inputs.mtpLayers)),
+        });
+        fullWeight = calculateDeepseekV4Weight({
+          profile,
+          hiddenSize: H,
+          expertCount: model.expertCount,
+          topK: model.topK,
+          tpSize: 1,
+          epSize: 1,
+          mtpLayers: Math.floor(safe(inputs.mtpLayers)),
+        }).total;
+      } else {
+        weightBreakdown = calculateMiniMaxM3Weight({
+          profile,
+          hiddenSize: H,
+          expertCount: model.expertCount,
+          tpSize: tp,
+          epSize: ep,
+          enableSharedExpertTp: inputs.enableSharedExpertTp,
+        });
+      }
       weight = weightBreakdown.total;
     }
 
@@ -133,6 +168,7 @@ export default function Home() {
       cann,
       deviceOS,
       weight,
+      fullWeight,
       weightBreakdown,
       weightConfigValid,
       total,
@@ -225,13 +261,22 @@ export default function Home() {
                 <NumberField label="DP size" value={inputs.dpSize} onChange={(v) => update("dpSize", v)} />
                 <NumberField label="TP size" value={inputs.tpSize} onChange={(v) => update("tpSize", v)} />
               </div>
-              <ToggleField
-                label="Shared Expert TP"
-                checked={inputs.enableSharedExpertTp}
-                onChange={(checked) => setInputs((current) => ({ ...current, enableSharedExpertTp: checked }))}
-                disabled={!model.weightProfile}
-              />
-              <p className="field-note">仅 MiniMax M3 权重建模使用；默认关闭，开启后 Shared Expert 按 TP 切分。</p>
+              {isV4 ? (
+                <>
+                  <NumberField label="MTP layers" value={inputs.mtpLayers} onChange={(v) => update("mtpLayers", v)} />
+                  <p className="field-note">对齐 vLLM `--enable-expert-parallel`：EP = TP × DP；Shared Expert / Embedding / LM Head 随 TP 切分；Indexer 整层复制。MTP 默认 1 层。</p>
+                </>
+              ) : (
+                <>
+                  <ToggleField
+                    label="Shared Expert TP"
+                    checked={inputs.enableSharedExpertTp}
+                    onChange={(checked) => setInputs((current) => ({ ...current, enableSharedExpertTp: checked }))}
+                    disabled={!model.weightProfile}
+                  />
+                  <p className="field-note">仅 MiniMax M3 权重建模使用；默认关闭，开启后 Shared Expert 按 TP 切分。</p>
+                </>
+              )}
             </fieldset>
 
             <fieldset>
@@ -264,6 +309,12 @@ export default function Home() {
               <div className="model-fact"><span>TopK 专家</span><strong>{model.topK.toLocaleString("zh-CN")}</strong></div>
               <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
               <div className="model-fact"><span>本地专家数</span><strong>{localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong><small>{model.expertCount} ÷ EP {epSize}</small></div>
+              {isV4 && result.weightConfigValid && (
+                <>
+                  <div className="model-fact"><span>全量模型权重</span><strong>{formatGiB(result.fullWeight)}</strong><small>TP1 × EP1，含 MTP {inputs.mtpLayers}</small></div>
+                  <div className="model-fact"><span>当前单卡权重</span><strong>{formatGiB(result.weight)}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
+                </>
+              )}
               <a className="model-source" href={model.source} target="_blank" rel="noopener noreferrer" aria-label={`查看 ${model.label} 官方配置`}>官方配置 ↗</a>
             </article>
 
@@ -298,7 +349,22 @@ export default function Home() {
               <div className="detail-sections">
                 {model.weightProfile && (
                   <DetailSection title="权重占用" value={result.weight} tone="rose">
-                    {result.weightBreakdown ? (
+                    {result.weightBreakdown && isDeepseekV4Breakdown(result.weightBreakdown) ? (
+                      <>
+                        <DetailRow label="Routed Experts MXFP4 payload" value={result.weightBreakdown.routedExpertPayload} formula={`${model.weightProfile.moeLayers} × (${model.expertCount} ÷ ${epSize}) × 3 × ${model.hiddenSize} × ${model.weightProfile.expertIntermediateSize} × 0.5`} />
+                        <DetailRow label="Routed Experts MXFP4 scale" value={result.weightBreakdown.routedExpertScales} formula="out × (in / 32) e8m0；随本地专家数 E ÷ EP 切分" />
+                        <DetailRow label="Shared Experts FP8（随 TP）" value={result.weightBreakdown.sharedExperts} formula={`L × [fp8([2 × I÷${inputs.tpSize}, H]) + fp8([H, I÷${inputs.tpSize}])]，128×128 scale`} />
+                        <DetailRow label="Router + Hash（复制）" value={result.weightBreakdown.router} formula="gate BF16 + e_score_correction_bias FP32 + hash tid2eid int32" />
+                        <DetailRow label="Attention TP：wq_b / wo_a / wo_b" value={result.weightBreakdown.attentionTp} formula={`wq_b、wo_a、wo_b 按 TP ${inputs.tpSize} 切 heads / o_groups`} />
+                        <DetailRow label="Attention 复制：fused_wqa_wkv + compressor" value={result.weightBreakdown.attentionReplicated - result.weightBreakdown.indexer} formula="fused_wqa_wkv、q/kv Norm、CSA/HCA compressor 不随 TP 下降" />
+                        <DetailRow label="Indexer（复制，仅 CSA）" value={result.weightBreakdown.indexer} formula={`仅 ${model.weightProfile.csaLayers} 层 CSA；vLLM 整层复制，不是官方 inference/model.py 的 Column-Parallel`} />
+                        <DetailRow label="mHC（FP32，复制）" value={result.weightBreakdown.mhc} formula="hc_attn_fn / hc_ffn_fn / bases / scales / hc_head" />
+                        <DetailRow label="Norm" value={result.weightBreakdown.norms} formula="(2L + 1) × H × 2 B" />
+                        <DetailRow label="Embedding" value={result.weightBreakdown.embedding} formula={`${result.weightBreakdown.paddedVocab} ÷ ${inputs.tpSize} × ${model.hiddenSize} × 2 B`} />
+                        <DetailRow label="LM Head" value={result.weightBreakdown.lmHead} formula={`${result.weightBreakdown.paddedVocab} ÷ ${inputs.tpSize} × ${model.hiddenSize} × 2 B`} />
+                        <DetailRow label={`MTP × ${inputs.mtpLayers}`} value={result.weightBreakdown.mtpWeight} formula="每层 = SWA Attention + MoE + e_proj/h_proj + extra Norm + hc_head" />
+                      </>
+                    ) : result.weightBreakdown ? (
                       <>
                         <DetailRow label="Routed Experts FP8 payload" value={result.weightBreakdown.routedExpertPayload} formula={`${model.weightProfile.moeLayers} × (${model.expertCount} ÷ ${epSize}) × 3 × ${model.hiddenSize} × ${model.weightProfile.expertIntermediateSize}`} />
                         <DetailRow label="Routed Experts MXFP8 scale" value={result.weightBreakdown.routedExpertScales} formula="随本地专家数 E ÷ EP 切分；每 [1, 32] block 1 B" />
@@ -346,7 +412,7 @@ export default function Home() {
               </div>
             </article>
 
-            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。MiniMax M3 权重默认包含 MXFP8 scale；EP 自动等于 TP × DP。其他模型暂不计算权重。</p>
+            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。EP 自动等于 TP × DP。DeepSeek V4 权重对齐 vLLM `--enable-expert-parallel`（Routed Experts MXFP4，其余 Linear 多为 FP8 128×128，Indexer 复制）。MiniMax M3 权重默认包含 MXFP8 scale。其他模型暂不计算权重。</p>
           </section>
         </section>
       </div>

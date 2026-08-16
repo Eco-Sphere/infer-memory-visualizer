@@ -9,7 +9,10 @@ export type ModelConfig = {
   weightProfile?: WeightProfile;
 };
 
+export type WeightArchitecture = "minimax-m3" | "deepseek-v4";
+
 export type WeightProfile = {
+  architecture?: WeightArchitecture;
   vocabSize: number;
   totalLayers: number;
   denseLayers: number;
@@ -23,7 +26,26 @@ export type WeightProfile = {
   indexerHeadDim: number;
   sharedExperts: number;
   vocabPaddingSize: number;
+  qLoraRank?: number;
+  oGroups?: number;
+  oLoraRank?: number;
+  hashLayers?: number;
+  csaLayers?: number;
+  hcaLayers?: number;
+  slidingWindowLayers?: number;
+  hcMult?: number;
 };
+
+export function isDeepseekV4Profile(profile: WeightProfile): boolean {
+  return profile.architecture === "deepseek-v4"
+    && profile.qLoraRank != null
+    && profile.oGroups != null
+    && profile.oLoraRank != null
+    && profile.hashLayers != null
+    && profile.csaLayers != null
+    && profile.hcaLayers != null
+    && profile.hcMult != null;
+}
 
 // Curated from the same official Hugging Face config sources used by
 // kv-cache-calculator. This calculator intentionally lists MoE models only.
@@ -62,24 +84,83 @@ const SPECIAL_TOP_K: Record<string, number> = {
   "minimax-m3": 4,
 };
 
+const DEEPSEEK_V4_PRO_PROFILE: WeightProfile = {
+  architecture: "deepseek-v4",
+  vocabSize: 129280,
+  totalLayers: 61,
+  denseLayers: 0,
+  moeLayers: 61,
+  expertIntermediateSize: 3072,
+  denseIntermediateSize: 3072,
+  attentionHeads: 128,
+  kvHeads: 1,
+  headDim: 512,
+  indexerHeads: 64,
+  indexerHeadDim: 128,
+  sharedExperts: 1,
+  vocabPaddingSize: 64,
+  qLoraRank: 1536,
+  oGroups: 16,
+  oLoraRank: 1024,
+  hashLayers: 3,
+  csaLayers: 29,
+  hcaLayers: 32,
+  slidingWindowLayers: 0,
+  hcMult: 4,
+};
+
+const DEEPSEEK_V4_FLASH_PROFILE: WeightProfile = {
+  architecture: "deepseek-v4",
+  vocabSize: 129280,
+  totalLayers: 43,
+  denseLayers: 0,
+  moeLayers: 43,
+  expertIntermediateSize: 2048,
+  denseIntermediateSize: 2048,
+  attentionHeads: 64,
+  kvHeads: 1,
+  headDim: 512,
+  indexerHeads: 64,
+  indexerHeadDim: 128,
+  sharedExperts: 1,
+  vocabPaddingSize: 64,
+  qLoraRank: 1024,
+  oGroups: 8,
+  oLoraRank: 1024,
+  hashLayers: 3,
+  csaLayers: 20,
+  hcaLayers: 21,
+  slidingWindowLayers: 2,
+  hcMult: 4,
+};
+
+const MINIMAX_M3_PROFILE: WeightProfile = {
+  architecture: "minimax-m3",
+  vocabSize: 200064,
+  totalLayers: 60,
+  denseLayers: 3,
+  moeLayers: 57,
+  expertIntermediateSize: 3072,
+  denseIntermediateSize: 12288,
+  attentionHeads: 64,
+  kvHeads: 4,
+  headDim: 128,
+  indexerHeads: 4,
+  indexerHeadDim: 128,
+  sharedExperts: 1,
+  vocabPaddingSize: 64,
+};
+
+const WEIGHT_PROFILES: Record<string, WeightProfile> = {
+  "deepseek-v4-pro": DEEPSEEK_V4_PRO_PROFILE,
+  "deepseek-v4-flash": DEEPSEEK_V4_FLASH_PROFILE,
+  "minimax-m3": MINIMAX_M3_PROFILE,
+};
+
 export const MODELS: ModelConfig[] = BASE_MODELS.map((model) => ({
   ...model,
   topK: SPECIAL_TOP_K[model.id] ?? 8,
-  weightProfile: model.id === "minimax-m3" ? {
-    vocabSize: 200064,
-    totalLayers: 60,
-    denseLayers: 3,
-    moeLayers: 57,
-    expertIntermediateSize: 3072,
-    denseIntermediateSize: 12288,
-    attentionHeads: 64,
-    kvHeads: 4,
-    headDim: 128,
-    indexerHeads: 4,
-    indexerHeadDim: 128,
-    sharedExperts: 1,
-    vocabPaddingSize: 64,
-  } : undefined,
+  weightProfile: WEIGHT_PROFILES[model.id],
 }));
 
 export const DEFAULT_MODEL_ID = "deepseek-v3";
