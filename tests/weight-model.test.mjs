@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateMiniMaxM3Weight, mxfp8MatrixMemory } from "../app/weight-model.ts";
+import {
+  calculateDeepseekV4Weight,
+  calculateMiniMaxM3Weight,
+  fp8BlockMemory,
+  mxfp4K32Memory,
+  mxfp8MatrixMemory,
+} from "../app/weight-model.ts";
 
 const profile = {
   vocabSize: 200064,
@@ -80,4 +86,115 @@ test("index K stays replicated while index Q follows TP", () => {
   const indexScaleTp2 = tp2.attentionScales - mainAttentionScaleTp2;
   assert.equal(indexScaleTp1, 57 * (98_304 + 24_576));
   assert.equal(indexScaleTp2, 57 * (49_152 + 24_576));
+});
+
+const GIB = 1024 ** 3;
+
+const v4Pro = {
+  architecture: "deepseek-v4",
+  vocabSize: 129280,
+  totalLayers: 61,
+  denseLayers: 0,
+  moeLayers: 61,
+  expertIntermediateSize: 3072,
+  denseIntermediateSize: 3072,
+  attentionHeads: 128,
+  kvHeads: 1,
+  headDim: 512,
+  indexerHeads: 64,
+  indexerHeadDim: 128,
+  sharedExperts: 1,
+  vocabPaddingSize: 64,
+  qLoraRank: 1536,
+  oGroups: 16,
+  oLoraRank: 1024,
+  hashLayers: 3,
+  csaLayers: 29,
+  hcaLayers: 32,
+  slidingWindowLayers: 0,
+  hcMult: 4,
+};
+
+const v4Flash = {
+  ...v4Pro,
+  totalLayers: 43,
+  moeLayers: 43,
+  expertIntermediateSize: 2048,
+  denseIntermediateSize: 2048,
+  attentionHeads: 64,
+  qLoraRank: 1024,
+  oGroups: 8,
+  csaLayers: 20,
+  hcaLayers: 21,
+  slidingWindowLayers: 2,
+};
+
+function v4Weight(profile, hiddenSize, expertCount, tpSize, epSize, mtpLayers = 1) {
+  return calculateDeepseekV4Weight({
+    profile,
+    hiddenSize,
+    expertCount,
+    topK: 6,
+    tpSize,
+    epSize,
+    mtpLayers,
+  });
+}
+
+test("FP8 block memory uses 128x128 e8m0 scales", () => {
+  assert.deepEqual(fp8BlockMemory(256, 256), {
+    payload: 65_536,
+    scales: 4,
+    total: 65_540,
+  });
+});
+
+test("MXFP4 K32 memory stores two values per byte plus in/32 scales", () => {
+  assert.deepEqual(mxfp4K32Memory(32, 32), {
+    payload: 512,
+    scales: 32,
+    total: 544,
+  });
+});
+
+test("DeepSeek V4-Pro TP8/DP8 matches RFC 18.52 GiB", () => {
+  const result = v4Weight(v4Pro, 7168, 384, 8, 64);
+  assert.ok(Math.abs(result.total / GIB - 18.52) < 0.02);
+  assert.ok(Math.abs(result.routedExpertPayload / GIB - 11.25879) < 0.00001);
+  assert.ok(Math.abs(result.routedExpertScales / GIB - 0.70367) < 0.00001);
+});
+
+test("DeepSeek V4-Flash TP8/DP8 matches RFC 4.32 GiB", () => {
+  const result = v4Weight(v4Flash, 4096, 256, 8, 64);
+  assert.ok(Math.abs(result.total / GIB - 4.32) < 0.02);
+  assert.ok(Math.abs(result.routedExpertPayload / GIB - 2.01562) < 0.00001);
+});
+
+test("DeepSeek V4-Pro TP1/DP64 keeps routed experts and copies attention", () => {
+  const tp8 = v4Weight(v4Pro, 7168, 384, 8, 64);
+  const tp1 = v4Weight(v4Pro, 7168, 384, 1, 64);
+  assert.equal(tp1.routedExpertPayload, tp8.routedExpertPayload);
+  assert.equal(tp1.routedExpertScales, tp8.routedExpertScales);
+  assert.equal(tp1.fusedWqaWkv, tp8.fusedWqaWkv);
+  assert.equal(tp1.indexer, tp8.indexer);
+  assert.equal(tp1.mhc, tp8.mhc);
+  assert.equal(tp1.router, tp8.router);
+  assert.ok(tp1.wqB > tp8.wqB);
+  assert.ok(tp1.sharedExperts > tp8.sharedExperts);
+  assert.ok(Math.abs(tp1.total / GIB - 39.29) < 0.02);
+});
+
+test("DeepSeek V4 Indexer stays replicated across TP", () => {
+  const tp1 = v4Weight(v4Pro, 7168, 384, 1, 8);
+  const tp8 = v4Weight(v4Pro, 7168, 384, 8, 64);
+  assert.equal(tp1.indexer, tp8.indexer);
+  assert.equal(tp1.compressorCsa, tp8.compressorCsa);
+  assert.equal(tp1.compressorHca, tp8.compressorHca);
+});
+
+test("DeepSeek V4 full-model weights match RFC TP1/EP1 totals", () => {
+  const pro = v4Weight(v4Pro, 7168, 384, 1, 1);
+  const flash = v4Weight(v4Flash, 4096, 256, 1, 1);
+  assert.ok(Math.abs(pro.total / GIB - 805.28) < 0.02);
+  assert.ok(Math.abs(flash.total / GIB - 148.62) < 0.02);
 });
