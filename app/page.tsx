@@ -26,7 +26,6 @@ const DEFAULTS: Inputs = {
 
 const GB = 1_000_000_000;
 const GIB = 1024 ** 3;
-const MB = 1_000_000;
 const MIB = 1024 ** 2;
 const align = (value: number, boundary: number) =>
   Math.ceil(value / boundary) * boundary;
@@ -77,13 +76,14 @@ export default function Home() {
     const moeBuffers = 4 * 2 * dp * T * K / ep * H;
     const activation = hiddenResidual + moeBuffers;
 
-    const hcclDP = Math.max(Math.ceil(((dp + 1) * 4) / 1024 ** 2), 50) * 2 * MB;
-    const hcclTP = 200 * 2 * MB;
+    const hcclDP = Math.max(Math.ceil(((dp + 1) * 4) / MIB), 50) * 2 * MIB;
+    const hcclTP = 200 * 2 * MIB;
     const alignedDispatch = align480To512(align(2 * H, 32) + 64);
     const alignedCombine = align(2 * H, 512);
     const epDispatch = localExperts * maxBS * ep * alignedDispatch;
     const epCombine = K * maxBS * alignedCombine;
     const hcclEP = 2 * (epDispatch + epCombine);
+    const hcclBuffsizeMiB = Math.max(1, Math.ceil(hcclEP / MIB));
     const hccl = hcclDP + hcclTP + hcclEP;
 
     const graph = (safe(inputs.graphCount) / 5) * 0.27 * GB;
@@ -125,6 +125,7 @@ export default function Home() {
       hcclDP,
       hcclTP,
       hcclEP,
+      hcclBuffsizeMiB,
       epDispatch: 2 * epDispatch,
       epCombine: 2 * epCombine,
       alignedDispatch,
@@ -327,9 +328,10 @@ export default function Home() {
                 </DetailSection>
 
                 <DetailSection title="HCCL buffer" value={result.hccl} tone="blue">
-                  <DetailRow label="DP buffer" value={result.hcclDP} formula={`max(ceil((${inputs.dpSize} + 1) × 4 ÷ 1024²), 50) × 2 MB`} />
-                  <DetailRow label="TP buffer" value={result.hcclTP} formula="200 MB × 2" />
+                  <DetailRow label="DP buffer" value={result.hcclDP} formula={`max(ceil((${inputs.dpSize} + 1) × 4 ÷ 1024²), 50) × 2 MiB`} />
+                  <DetailRow label="TP buffer" value={result.hcclTP} formula="200 MiB × 2" />
                   <DetailRow label={`EP buffer（本地专家 ${localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}）`} value={result.hcclEP} formula={`2 × (${model.expertCount} ÷ ${epSize} × Max BS × EP × 480Align512 + K × Max BS × Align512)`} />
+                  <DetailRow label={`建议 export HCCL_BUFFSIZE=${result.hcclBuffsizeMiB}`} value={result.hcclBuffsizeMiB * MIB} formula={`ceil(EP buffer ÷ 1024²) = ${result.hcclBuffsizeMiB}`} />
                   <div className="sub-detail">
                     <span>Dispatch {formatMiB(result.epDispatch)}</span>
                     <span>Combine {formatMiB(result.epCombine)}</span>
@@ -346,7 +348,7 @@ export default function Home() {
               </div>
             </article>
 
-            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。MiniMax M3 权重默认包含 MXFP8 scale；EP 自动等于 TP × DP。其他模型暂不计算权重。</p>
+            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。MiniMax M3 权重默认包含 MXFP8 scale；EP 自动等于 TP × DP。其他模型暂不计算权重。建议 <code>export HCCL_BUFFSIZE</code> 取 EP buffer 向上取整到 MiB（与 CANN DispatchV2 / vLLM-Ascend MC2 比较；combine 按 topK，不含本卡 shared 专家）。</p>
           </section>
         </section>
       </div>
