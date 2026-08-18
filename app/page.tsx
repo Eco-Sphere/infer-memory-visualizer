@@ -100,12 +100,13 @@ export default function Home() {
 
     const hcclDP = Math.max(Math.ceil(((dp + 1) * 4) / 1024 ** 2), 50) * 2 * MB;
     const hcclTP = 200 * 2 * MB;
+    const hcclEP = 200 * 2 * MB;
     const alignedDispatch = align480To512(align(2 * H, 32) + 64);
     const alignedCombine = align(2 * H, 512);
     const epDispatch = localExperts * maxBS * ep * alignedDispatch;
     const epCombine = K * maxBS * alignedCombine;
-    const hcclEP = 2 * (epDispatch + epCombine);
-    const hccl = hcclDP + hcclTP + hcclEP;
+    const hcclMC2 = 2 * (epDispatch + epCombine);
+    const hccl = hcclDP + hcclTP + hcclEP + hcclMC2;
 
     const graph = (safe(inputs.graphCount) / 5) * 0.27 * GB;
     const cann = safe(inputs.cannGB) * GIB;
@@ -188,6 +189,7 @@ export default function Home() {
       hcclDP,
       hcclTP,
       hcclEP,
+      hcclMC2,
       epDispatch: 2 * epDispatch,
       epCombine: 2 * epCombine,
       alignedDispatch,
@@ -470,7 +472,8 @@ export default function Home() {
                 <DetailSection title="HCCL buffer" value={result.hccl} tone="blue">
                   <DetailRow label="DP buffer" value={result.hcclDP} formula={`max(ceil((${inputs.dpSize} + 1) × 4 ÷ 1024²), 50) × 2 MB`} />
                   <DetailRow label="TP buffer" value={result.hcclTP} formula="200 MB × 2" />
-                  <DetailRow label={`EP buffer（本地专家 ${localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}）`} value={result.hcclEP} formula={`2 × (${model.expertCount} ÷ ${epSize} × Max BS × EP × 480Align512 + K × Max BS × Align512)`} />
+                  <DetailRow label="EP buffer" value={result.hcclEP} formula="200 MB × 2" />
+                  <DetailRow label={`MC2 buffer（本地专家 ${localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}）`} value={result.hcclMC2} formula={`2 × (${model.expertCount} ÷ ${epSize} × Max BS × EP × 480Align512 + K × Max BS × Align512)`} />
                   <div className="sub-detail">
                     <span>Dispatch {formatMiB(result.epDispatch)}</span>
                     <span>Combine {formatMiB(result.epCombine)}</span>
