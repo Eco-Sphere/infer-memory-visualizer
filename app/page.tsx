@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { DEFAULT_MODEL_ID, MODELS } from "./models";
-import { CACHE_PRECISIONS, calculateKvCache, type CachePrecision } from "./kv-cache-model";
+import { CACHE_PRECISIONS, calculateKvCache, getKvCacheModelInfo, type CachePrecision } from "./kv-cache-model";
 import { calculateMiniMaxWeight } from "./weight-model";
 
 type Inputs = {
@@ -39,7 +39,7 @@ const DEFAULTS: Inputs = {
   kvCacheTokens: 131072,
   kvCacheSequences: 8,
   kvPrecision: "fp8_int8",
-  indexCachePrecision: "fp4_int4",
+  indexCachePrecision: "fp8_int8",
   maxBS: 128,
   graphCount: 5,
   cannGB: 1,
@@ -111,7 +111,9 @@ export default function Home() {
     const cann = safe(inputs.cannGB) * GIB;
     const deviceOS = 4.25 * GIB;
     const profile = model.weightProfile;
-    const kvCacheProfile = model.kvCacheProfile;
+    const kvCacheInfo = model.kvCacheModelId
+      ? getKvCacheModelInfo(model.kvCacheModelId, model.sharedKv ?? false)
+      : undefined;
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
     const attentionTp = Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1)));
     const oprojTp = Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? tp, 1)));
@@ -165,14 +167,16 @@ export default function Home() {
       }).total;
     }
 
-    const kvCacheBreakdown = kvCacheProfile ? calculateKvCache({
-      profile: kvCacheProfile,
+    const kvCacheBreakdown = model.kvCacheModelId ? calculateKvCache({
+      modelId: model.kvCacheModelId,
+      sharedKv: model.sharedKv ?? false,
       tokens: safe(inputs.kvCacheTokens, DEFAULTS.kvCacheTokens),
       sequences: safe(inputs.kvCacheSequences, DEFAULTS.kvCacheSequences),
       kvPrecision: inputs.kvPrecision ?? DEFAULTS.kvPrecision,
       indexPrecision: inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision,
       mtpLayers: Math.floor(safe(inputs.mtpLayers)),
-    }) : null;
+      tpSize: attentionTp,
+    }) ?? null : null;
     const kvCache = kvCacheBreakdown?.total ?? 0;
 
     const total = weight + kvCache + activation + hccl + graph + cann + deviceOS;
@@ -201,6 +205,7 @@ export default function Home() {
       fullWeight,
       kvCache,
       kvCacheBreakdown,
+      kvCacheInfo,
       weightBreakdown,
       weightConfigValid,
       total,
@@ -234,7 +239,7 @@ export default function Home() {
 
   const categories = [
     ...(model.weightProfile ? [{ label: "权重占用", value: result.weight, color: "var(--rose)", display: result.weightConfigValid ? formatGiB(result.weight) : "配置无效" }] : []),
-    ...(model.kvCacheProfile ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
+    ...(model.kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
     { label: "激活占用", value: result.activation, color: "var(--coral)", display: formatGiB(result.activation) },
     { label: "HCCL buffer", value: result.hccl, color: "var(--blue)", display: formatGiB(result.hccl) },
     { label: "图占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
@@ -292,7 +297,7 @@ export default function Home() {
               <NumberField label="Max batched tokens" value={inputs.maxBatchedTokens} onChange={(v) => update("maxBatchedTokens", v)} />
             </fieldset>
 
-            {model.kvCacheProfile && (
+            {model.kvCacheModelId && (
               <fieldset>
                 <legend>KV Cache</legend>
                 <div className="field-grid">
@@ -303,7 +308,7 @@ export default function Home() {
                   <SelectField label="KV precision" value={inputs.kvPrecision ?? DEFAULTS.kvPrecision} onChange={(value) => setInputs((current) => ({ ...current, kvPrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                   <SelectField label="Index precision" value={inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision} onChange={(value) => setInputs((current) => ({ ...current, indexCachePrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                 </div>
-                <p className="field-note">{model.kvCacheProfile.sharedKv ? "K/V 共用一份 Cache" : "标准 GQA，K/V 各存一份 Cache"}；Index Cache 支持 FP4 / INT4。</p>
+                <p className="field-note">{model.sharedKv ? "K/V 共用一份 Cache" : "标准 GQA，K/V 各存一份 Cache"}。</p>
               </fieldset>
             )}
 
@@ -443,17 +448,17 @@ export default function Home() {
                   </DetailSection>
                 )}
 
-                {model.kvCacheProfile && result.kvCacheBreakdown && (
+                {result.kvCacheInfo && result.kvCacheBreakdown && (
                   <DetailSection title="KV + Index Cache" value={result.kvCache} tone="cyan">
                     <DetailRow
-                      label={`${model.kvCacheProfile.sharedKv ? "共享 K/V Cache" : "K/V Cache"}（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
+                      label={`${result.kvCacheInfo.sharedKv ? "共享 K/V Cache" : "K/V Cache"}（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
                       value={result.kvCacheBreakdown.kvCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${model.kvCacheProfile.layers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheBreakdown.kvCopies} × ${model.kvCacheProfile.kvHeads} × ${model.kvCacheProfile.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveKvLayers} 层，${model.kvCacheProfile.sharedKv ? "K/V 共用一份" : "K/V 各存一份"}`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheBreakdown.kvCopies} × ${result.kvCacheInfo.sharedKv ? result.kvCacheInfo.kvHeads : `(${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp})`} × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveKvLayers} 层，${result.kvCacheInfo.sharedKv ? "K/V 共用一份，随 TP 复制" : "K/V 各存一份，随 TP 切分"}`}
                     />
                     <DetailRow
                       label={`Index Cache（${CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}
                       value={result.kvCacheBreakdown.indexCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${model.kvCacheProfile.sparseLayers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${model.kvCacheProfile.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveIndexLayers} 层`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.sparseLayers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheInfo.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveIndexLayers} 层，Index K 随 TP 复制，不切分`}
                     />
                   </DetailSection>
                 )}

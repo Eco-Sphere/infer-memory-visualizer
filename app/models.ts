@@ -7,20 +7,12 @@ export type ModelConfig = {
   topK: number;
   source?: string;
   weightProfile?: WeightProfile;
-  kvCacheProfile?: KvCacheProfile;
+  kvCacheModelId?: string;
+  sharedKv?: boolean;
   supportsMtp?: boolean;
 };
 
 export type MxWeightFormat = "mxfp8" | "mxfp4";
-
-export type KvCacheProfile = {
-  layers: number;
-  sparseLayers: number;
-  kvHeads: number;
-  headDim: number;
-  indexHeadDim: number;
-  sharedKv: boolean;
-};
 
 export type WeightProfile = {
   vocabSize: number;
@@ -101,14 +93,7 @@ export const MODELS: ModelConfig[] = BASE_MODELS.map((model) => ({
     moeWeightFormat: "mxfp8",
     qkvProjection: "qkvo",
   } : undefined,
-  kvCacheProfile: model.id === "minimax-m3" ? {
-    layers: 60,
-    sparseLayers: 57,
-    kvHeads: 4,
-    headDim: 128,
-    indexHeadDim: 128,
-    sharedKv: false,
-  } : undefined,
+  kvCacheModelId: model.id === "minimax-m3" ? "minimax-m3" : undefined,
 }));
 
 export const DEFAULT_MODEL_ID = "minimax-m3";
