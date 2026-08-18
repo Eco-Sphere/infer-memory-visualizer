@@ -112,7 +112,7 @@ export default function Home() {
     const deviceOS = 4.25 * GIB;
     const profile = model.weightProfile;
     const kvCacheInfo = model.kvCacheModelId
-      ? getKvCacheModelInfo(model.kvCacheModelId, model.sharedKv ?? false)
+      ? getKvCacheModelInfo(model.kvCacheModelId)
       : undefined;
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
     const attentionTp = Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1)));
@@ -169,7 +169,6 @@ export default function Home() {
 
     const kvCacheBreakdown = model.kvCacheModelId ? calculateKvCache({
       modelId: model.kvCacheModelId,
-      sharedKv: model.sharedKv ?? false,
       tokens: safe(inputs.kvCacheTokens, DEFAULTS.kvCacheTokens),
       sequences: safe(inputs.kvCacheSequences, DEFAULTS.kvCacheSequences),
       kvPrecision: inputs.kvPrecision ?? DEFAULTS.kvPrecision,
@@ -308,7 +307,7 @@ export default function Home() {
                   <SelectField label="KV precision" value={inputs.kvPrecision ?? DEFAULTS.kvPrecision} onChange={(value) => setInputs((current) => ({ ...current, kvPrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                   <SelectField label="Index precision" value={inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision} onChange={(value) => setInputs((current) => ({ ...current, indexCachePrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                 </div>
-                <p className="field-note">{model.sharedKv ? "K/V 共用一份 Cache" : "标准 GQA，K/V 各存一份 Cache"}。</p>
+                <p className="field-note">标准 GQA，K/V 各存一份 Cache。</p>
               </fieldset>
             )}
 
@@ -451,9 +450,9 @@ export default function Home() {
                 {result.kvCacheInfo && result.kvCacheBreakdown && (
                   <DetailSection title="KV + Index Cache" value={result.kvCache} tone="cyan">
                     <DetailRow
-                      label={`${result.kvCacheInfo.sharedKv ? "共享 K/V Cache" : "K/V Cache"}（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
+                      label={`K/V Cache（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
                       value={result.kvCacheBreakdown.kvCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheBreakdown.kvCopies} × ${result.kvCacheInfo.sharedKv ? result.kvCacheInfo.kvHeads : `(${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp})`} × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveKvLayers} 层，${result.kvCacheInfo.sharedKv ? "K/V 共用一份，随 TP 复制" : "K/V 各存一份，随 TP 切分"}`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveKvLayers} 层，K/V 各存一份，随 TP 切分`}
                     />
                     <DetailRow
                       label={`Index Cache（${CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}

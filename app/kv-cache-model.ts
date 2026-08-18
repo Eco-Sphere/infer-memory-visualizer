@@ -15,14 +15,13 @@ export type KvCacheModelInfo = {
   kvHeads: number;
   headDim: number;
   indexHeadDim: number;
-  sharedKv: boolean;
 };
 
 function findUpstreamModel(modelId: string) {
   return kvModelData.models.find((model) => model.id === modelId);
 }
 
-export function getKvCacheModelInfo(modelId: string, sharedKv = false): KvCacheModelInfo | undefined {
+export function getKvCacheModelInfo(modelId: string): KvCacheModelInfo | undefined {
   const upstream = findUpstreamModel(modelId);
   if (!upstream) return undefined;
   const fields = upstream.fields;
@@ -32,13 +31,11 @@ export function getKvCacheModelInfo(modelId: string, sharedKv = false): KvCacheM
     kvHeads: Number(fields.num_key_value_heads),
     headDim: Number(fields.head_dim),
     indexHeadDim: Number(fields.index_head_dim),
-    sharedKv,
   };
 }
 
 type KvCacheInput = {
   modelId: string;
-  sharedKv?: boolean;
   tokens: number;
   sequences: number;
   kvPrecision: CachePrecision;
@@ -54,14 +51,12 @@ export type KvCacheBreakdown = {
   kvBytesPerElement: number;
   indexBytesPerElement: number;
   kvCopies: number;
-  kvHeadsPerDevice: number;
   effectiveKvLayers: number;
   effectiveIndexLayers: number;
 };
 
 export function calculateKvCache({
   modelId,
-  sharedKv = false,
   tokens,
   sequences,
   kvPrecision,
@@ -70,7 +65,7 @@ export function calculateKvCache({
   tpSize = 1,
 }: KvCacheInput): KvCacheBreakdown | null {
   const upstream = findUpstreamModel(modelId);
-  const info = getKvCacheModelInfo(modelId, sharedKv);
+  const info = getKvCacheModelInfo(modelId);
   if (!upstream || !info) return null;
   const safeTokens = Math.max(0, Math.floor(tokens));
   const safeSequences = Math.max(0, Math.floor(sequences));
@@ -80,10 +75,8 @@ export function calculateKvCache({
   const effectiveIndexLayers = info.sparseLayers + safeMtpLayers;
   const kvBytesPerElement = (CACHE_PRECISIONS[kvPrecision] ?? CACHE_PRECISIONS.bf16_fp16).bytes;
   const indexBytesPerElement = (CACHE_PRECISIONS[indexPrecision] ?? CACHE_PRECISIONS.fp4_int4).bytes;
-  // Standard GQA stores K and V separately; some architectures share one K/V tensor.
-  const kvCopies = sharedKv ? 1 : 2;
-  // GQA shards KV heads across TP ranks; a shared single-head K/V stays replicated.
-  const kvHeadsPerDevice = sharedKv ? info.kvHeads : info.kvHeads / safeTp;
+  // Standard GQA stores K and V separately and shards KV heads across TP ranks.
+  const kvCopies = 2;
 
   if (safeTokens === 0 || safeSequences === 0) {
     return {
@@ -93,7 +86,6 @@ export function calculateKvCache({
       kvBytesPerElement,
       indexBytesPerElement,
       kvCopies,
-      kvHeadsPerDevice,
       effectiveKvLayers,
       effectiveIndexLayers,
     };
@@ -101,7 +93,7 @@ export function calculateKvCache({
 
   // Delegate the per-token math to the upstream kv-cache-calculator engine.
   // MTP layers extend both the main KV layers and the sparse index layers.
-  const fields = {
+  const fields: Record<string, unknown> = {
     ...upstream.fields,
     num_hidden_layers: info.layers + safeMtpLayers,
     sparse_attention_layers: info.sparseLayers + safeMtpLayers,
@@ -119,9 +111,7 @@ export function calculateKvCache({
     },
   );
 
-  // Upstream MiniMax MSA always counts K and V; shared-K/V architectures store one copy.
-  const kvTotal = sharedKv ? result.kvBytes / 2 : result.kvBytes;
-  const kvCache = sharedKv ? kvTotal : kvTotal / safeTp;
+  const kvCache = result.kvBytes / safeTp;
   // The MSA index cache is a single key head, replicated across TP ranks.
   const indexCache = result.indexerBytes;
 
@@ -132,7 +122,6 @@ export function calculateKvCache({
     kvBytesPerElement,
     indexBytesPerElement,
     kvCopies,
-    kvHeadsPerDevice,
     effectiveKvLayers,
     effectiveIndexLayers,
   };

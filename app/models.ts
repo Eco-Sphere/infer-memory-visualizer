@@ -8,7 +8,6 @@ export type ModelConfig = {
   source?: string;
   weightProfile?: WeightProfile;
   kvCacheModelId?: string;
-  sharedKv?: boolean;
   supportsMtp?: boolean;
 };
 

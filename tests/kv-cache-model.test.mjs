@@ -80,8 +80,6 @@ test("KV cache shards across TP while the index cache stays replicated", () => {
   const tp4 = calculateKvCache({ ...common, tpSize: 4 });
 
   assert.ok(tp1 && tp4);
-  assert.equal(tp1.kvHeadsPerDevice, 4);
-  assert.equal(tp4.kvHeadsPerDevice, 1);
   assert.equal(tp4.kvCache, tp1.kvCache / 4);
   assert.equal(tp4.indexCache, tp1.indexCache);
 });
