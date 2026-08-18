@@ -17,5 +17,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npm run build:pages
-      - run: node --test tests/*.test.mjs
+      - run: npm test
