@@ -243,7 +243,7 @@ export default function Home() {
     ...(model.kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
     { label: "激活占用", value: result.activation, color: "var(--coral)", display: formatGiB(result.activation) },
     { label: "HCCL buffer", value: result.hccl, color: "var(--blue)", display: formatGiB(result.hccl) },
-    { label: "图占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
+    { label: "ACLGraph 占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
     { label: "CANN + PTA + 算子", value: result.cann, color: "var(--green)", display: formatGiB(result.cann) },
     { label: "Device OS", value: result.deviceOS, color: "var(--amber)", display: "4.25 GiB" },
   ];
@@ -383,7 +383,7 @@ export default function Home() {
               <legend>运行时</legend>
               <div className="field-grid">
                 <NumberField label="Max BS" value={inputs.maxBS} onChange={(v) => update("maxBS", v)} />
-                <NumberField label="图个数" value={inputs.graphCount} onChange={(v) => update("graphCount", v)} />
+                <NumberField label="ACLGraph 个数" value={inputs.graphCount} onChange={(v) => update("graphCount", v)} />
               </div>
               <NumberField label="CANN + PTA + 算子预估（GiB）" value={inputs.cannGB} step="0.1" onChange={(v) => update("cannGB", v)} />
               <p className="field-note">该项默认按 1 GiB 预留，实际占用通常低于此值。</p>
@@ -509,7 +509,7 @@ export default function Home() {
                 </DetailSection>
 
                 <DetailSection title="其他运行时" value={result.graph + result.cann + result.deviceOS} tone="violet">
-                  <DetailRow label={`图占用（${inputs.graphCount} 张）`} value={result.graph} formula={`${inputs.graphCount} ÷ 5 × 0.27 GB`} />
+                  <DetailRow label={`ACLGraph 占用（${inputs.graphCount} 张）`} value={result.graph} formula={`${inputs.graphCount} ÷ 5 × 0.27 GB`} />
                   <DetailRow label="CANN + PTA + 算子" value={result.cann} formula={`${inputs.cannGB} GiB 预估值`} />
                   <DetailRow label="Device OS 固定占用" value={result.deviceOS} formula="4.25 × 1024³ bytes = 4.25 GiB" />
                 </DetailSection>
