@@ -8,7 +8,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
   const title = "推理显存建模 | MoE Memory Planner";
-  const description = "大模型分布式推理的权重、激活、HCCL、图与 CANN 显存估算工具。";
+  const description = "大模型分布式推理的权重、激活、HCCL、ACLGraph 与 CANN 显存估算工具。";
 
   return {
     title,
