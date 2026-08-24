@@ -55,11 +55,14 @@ button, input, select { font: inherit; }
 .brand-mark span:nth-child(2) { height: 15px; opacity: .75; }
 .brand-mark span:nth-child(3) { height: 21px; }
 .top-actions { gap: 8px; }
-.live, .theme-toggle, .unit-pill { border: 1px solid var(--line); background: var(--paper); color: var(--muted); box-shadow: inset 0 1px rgba(255,255,255,.25); }
+.live, .theme-toggle, .unit-pill, .top-link { border: 1px solid var(--line); background: var(--paper); color: var(--muted); box-shadow: inset 0 1px rgba(255,255,255,.25); }
 .live { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border-radius: 999px; font-size: 12px; }
 .live i { width: 6px; height: 6px; border-radius: 50%; background: #39a374; box-shadow: 0 0 0 4px rgba(57,163,116,.11); }
-.theme-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; cursor: pointer; font-size: 12px; }
-.theme-toggle:hover, .reset:hover { color: var(--ink); border-color: rgba(69, 115, 98, .34); }
+.theme-toggle, .top-link { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; }
+.theme-toggle { cursor: pointer; }
+.top-link { text-decoration: none; }
+.top-link svg { width: 14px; height: 14px; flex-shrink: 0; }
+.theme-toggle:hover, .top-link:hover, .reset:hover { color: var(--ink); border-color: rgba(69, 115, 98, .34); }
 
 .workspace { display: grid; grid-template-columns: 350px minmax(0, 1fr); align-items: start; gap: 16px; }
 .control-card, .hero-card, .metric-card, .breakdown-card {
