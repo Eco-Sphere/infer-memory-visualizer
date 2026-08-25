@@ -262,7 +262,6 @@ export default function Home() {
             </div>
           </div>
           <div className="top-actions">
-            <span className="live"><i />实时估算</span>
             <a
               className="top-link"
               href="https://github.com/Eco-Sphere/infer-memory-visualizer"
@@ -288,6 +287,22 @@ export default function Home() {
                 <line x1="12" y1="16.5" x2="12.01" y2="16.5" />
               </svg>
               反馈
+            </a>
+            <a
+              className="top-link"
+              href="https://github.com/Eco-Sphere/infer-memory-visualizer/blob/main/CONTRIBUTING.md"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="查看贡献指南"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="6" cy="6" r="2" />
+                <circle cx="18" cy="6" r="2" />
+                <circle cx="6" cy="18" r="2" />
+                <path d="M6 8v8" />
+                <path d="M8 6h5a5 5 0 0 1 5 5v5" />
+              </svg>
+              我要贡献
             </a>
             <button
               className="theme-toggle"

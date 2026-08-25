@@ -38,6 +38,8 @@ test("server-renders the inference memory planner", async () => {
   assert.match(html, /EP buffer/);
   assert.match(html, /MC2 buffer/);
   assert.match(html, /CANN \+ PTA \+ 算子/);
+  assert.match(html, /我要贡献/);
+  assert.match(html, /infer-memory-visualizer\/blob\/main\/CONTRIBUTING\.md/);
   assert.match(html, /单卡总显存预估（含权重）/);
   assert.match(html, /<strong>\d+\.\d{2}<\/strong><span>GiB<\/span>/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);

@@ -14,7 +14,7 @@
 
 - 按模型家族选择主流 MoE 模型，并展示隐藏维度、专家数和 Top-K 等参数。
 - 配置 DP、TP、EP，以及 Attention、O-Proj、Embedding、LM Head 和 Shared Expert 的独立 TP 策略。
-- 估算单卡权重占用，并支持自定义 Routed Expert、Shared Expert、Attention、Dense MLP、Embedding 和 LM Head的TP切分。
+- 估算单卡权重占用。
 - 独立配置 KV Cache 与 Index Cache 的上下文长度、序列数和精度。
 - 估算激活值、HCCL buffer、ACLGraph、CANN/PTA/算子与 Device OS 开销。
 - 支持 MTP 层数建模，并实时展示各部分占比和总显存。
@@ -34,13 +34,13 @@
 
 其中：
 
-- 权重计算考虑 MXFP8/MXFP4 payload、分块 scale metadata，以及不同组件的并行切分方式。
-- KV Cache 的基础计算复用 [`kv-cache-calculator`](https://github.com/Eco-Sphere/kv-cache-calculator)，主 KV 按 Attention TP 切分，Index Cache 按当前模型假设保留副本。
+- 权重计算考虑 MXFP8/MXFP4 payload、分块 scale metadata，以及不同模块的并行切分方式。
+- KV Cache 的基础计算复用 [`kv-cache-calculator`](https://github.com/Eco-Sphere/kv-cache-calculator)。
 - 激活值与 HCCL buffer 根据 token 数、并行规模、专家数量和最大 batch size 估算。
 - ACLGraph、CANN 及算子开销允许手动配置；Device OS 当前按固定值计入。
 - 界面使用 GiB/MiB 展示结果，内部计算保留字节精度。
 
-这些结果用于部署规划和方案比较，不等同于运行时峰值的严格保证。实际占用还会受到推理框架版本、算子实现、内存对齐、动态工作区、调度策略和硬件环境影响。上线前请使用目标环境进行实测。
+本工具结果可用于开发阶段验证显存占用，以及部署阶段估算最大并发。实际占用还会受到推理框架版本和算子实现的影响，上线前请使用目标环境进行实测。
 
 ## 本地开发
 
@@ -58,7 +58,7 @@ npm install
 npm run dev
 ```
 
-开发服务器启动后会在终端输出本地访问地址。项目基于 React、TypeScript、vinext 和 Cloudflare Vite 插件构建，本地开发不需要 `wrangler.jsonc`。
+开发服务器启动后会在终端输出本地访问地址。项目基于 React、TypeScript 和 vinext 构建。
 
 ## 常用命令
 
