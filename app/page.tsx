@@ -86,47 +86,70 @@ function safe(value: number, fallback = 0) {
   return Number.isFinite(value) ? Math.max(0, value) : fallback;
 }
 
-/** 将厂商下的（原始 + 量化）权重拍平成有序选项（raw 字母序，量化子项组内字母序）。 */
-function flattenWeights(vendor: Vendor): { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] {
-  const out: { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] = [];
-  for (const model of vendor.models) {
-    out.push({ owner: vendor.owner, name: model.name, kind: "raw", rawName: model.name });
-    for (const q of model.quantized) {
-      out.push({ owner: QUANT_OWNER, name: q, kind: "quantized", rawName: model.name });
-    }
+/** 某个原始权重（模型）下的全部权重选项：原始权重 + 其 Eco-Tech 量化权重。 */
+function modelWeightOptions(vendor: Vendor, modelName: string): { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] {
+  const model = vendor.models.find((m) => m.name === modelName);
+  if (!model) return [];
+  const out: { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] = [
+    { owner: vendor.owner, name: model.name, kind: "raw", rawName: model.name },
+  ];
+  for (const q of model.quantized) {
+    out.push({ owner: QUANT_OWNER, name: q, kind: "quantized", rawName: model.name });
   }
   return out;
-}
-
-function resolveWeight(vendor: Vendor, key: string) {
-  const slash = key.indexOf("/");
-  const owner = key.slice(0, slash);
-  const name = key.slice(slash + 1);
-  const list = flattenWeights(vendor);
-  return list.find((w) => w.owner === owner && w.name === name);
 }
 
 export default function Home() {
   const [inputs, setInputs] = useState(DEFAULTS);
   const [dark, setDark] = useState(false);
 
-  const [vendorBrand, setVendorBrand] = useState<string>(MODEL_INDEX[0].brand);
+  // 一级：厂商（空串表示「请按菜单栏开始选择」占位，不加载任何权重）
+  const [vendorBrand, setVendorBrand] = useState<string>("");
+  // 二级：模型（原始权重名）
+  const [modelName, setModelName] = useState<string>("");
+  // 三级：权重（owner/name）
+  const [weightKey, setWeightKey] = useState<string>("");
+
   const vendor = useMemo(
-    () => MODEL_INDEX.find((v) => v.brand === vendorBrand) ?? MODEL_INDEX[0],
+    () => (vendorBrand ? MODEL_INDEX.find((v) => v.brand === vendorBrand) : undefined),
     [vendorBrand],
   );
-  const weightList = useMemo(() => flattenWeights(vendor), [vendor]);
-  const defaultKey = `${vendor.owner}/${vendor.models[0].name}`;
-  const [weightKey, setWeightKey] = useState<string>(defaultKey);
+  const modelOptions = useMemo(
+    () => (vendor ? vendor.models.map((m) => ({ value: m.name, label: m.name })) : []),
+    [vendor],
+  );
+  const weightList = useMemo(
+    () => (vendor ? modelWeightOptions(vendor, modelName) : []),
+    [vendor, modelName],
+  );
+  const weight = weightList.find((w) => `${w.owner}/${w.name}` === weightKey);
 
-  // 切换厂商时重置为第一个原始权重
-  useEffect(() => {
-    setWeightKey(`${vendor.owner}/${vendor.models[0].name}`);
-    setModelData(null);
-    setError(undefined);
-  }, [vendor]);
+  const selectVendor = (brand: string) => {
+    setVendorBrand(brand);
+    if (!brand) {
+      setModelName("");
+      setWeightKey("");
+      return;
+    }
+    const next = MODEL_INDEX.find((v) => v.brand === brand);
+    const first = next?.models[0];
+    if (next && first) {
+      setModelName(first.name);
+      setWeightKey(`${next.owner}/${first.name}`);
+    } else {
+      setModelName("");
+      setWeightKey("");
+    }
+  };
 
-  const weight = resolveWeight(vendor, weightKey) ?? flattenWeights(vendor)[0];
+  const selectModel = (name: string) => {
+    setModelName(name);
+    if (vendor && name) {
+      setWeightKey(`${vendor.owner}/${name}`);
+    } else {
+      setWeightKey("");
+    }
+  };
 
   const [modelData, setModelData] = useState<ModelWeightData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -135,7 +158,12 @@ export default function Home() {
   // 仅在切换权重时拉取数据（结果由 fetchModelWeightData 会话内缓存）；
   // 并行参数变化不在此依赖中，因此不会触发任何网络请求。
   useEffect(() => {
-    if (!weight) return;
+    if (!weight) {
+      setModelData(null);
+      setLoading(false);
+      setError(undefined);
+      return;
+    }
     let cancelled = false;
     // 命中会话缓存时无需清空旧数据（直接同步替换、无闪烁）；仅在需要联网时清空。
     if (!getCachedModelWeightData(weight.owner, weight.name)) {
@@ -183,6 +211,8 @@ export default function Home() {
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
 
   const result = useMemo(() => {
+    // 未选择权重时，所有占用显示为 0（仅有 attentionTp 保留给高级切分显示）。
+    const active = weightKey ? 1 : 0;
     const H = struct?.hiddenSize ?? 0;
     const T = safe(inputs.maxBatchedTokens);
     const dp = Math.max(1, safe(inputs.dpSize, 1));
@@ -229,12 +259,24 @@ export default function Home() {
     const total = weight + kvCache + activation + hccl + graph + cann + deviceOS;
 
     return {
-      activation, hiddenResidual, moeBuffers, hccl, hcclDP, hcclTP, hcclEP, hcclMC2,
-      epDispatch: 2 * epDispatch, epCombine: 2 * epCombine, alignedDispatch, alignedCombine,
-      attentionTp, graph, cann, deviceOS, weight, fullWeight, kvCache, kvCacheBreakdown,
-      kvCacheInfo, weightResult, total, localExperts,
+      activation: active * activation,
+      hiddenResidual: active * hiddenResidual,
+      moeBuffers: active * moeBuffers,
+      hccl: active * hccl,
+      hcclDP: active * hcclDP,
+      hcclTP: active * hcclTP,
+      hcclEP: active * hcclEP,
+      hcclMC2: active * hcclMC2,
+      epDispatch: active * 2 * epDispatch,
+      epCombine: active * 2 * epCombine,
+      alignedDispatch: active * alignedDispatch,
+      alignedCombine: active * alignedCombine,
+      attentionTp, graph: active * graph, cann: active * cann, deviceOS: active * deviceOS,
+      weight: active * weight, fullWeight: active * fullWeight, kvCache: active * kvCache,
+      kvCacheBreakdown, kvCacheInfo, weightResult,
+      total: active * total, localExperts,
     };
-  }, [inputs, epSize, struct, weightResult, kvCacheModelId]);
+  }, [inputs, epSize, struct, weightResult, kvCacheModelId, weightKey]);
 
   const update = (key: keyof Inputs, value: string) => {
     setInputs((current) => ({ ...current, [key]: Number(value) }));
@@ -243,8 +285,9 @@ export default function Home() {
     setInputs((current) => ({ ...current, [key]: value === "" ? null : Number(value) }));
   };
   const reset = () => {
-    setVendorBrand(MODEL_INDEX[0].brand);
-    setWeightKey(`${MODEL_INDEX[0].owner}/${MODEL_INDEX[0].models[0].name}`);
+    setVendorBrand("");
+    setModelName("");
+    setWeightKey("");
     setInputs(DEFAULTS);
   };
 
@@ -255,7 +298,7 @@ export default function Home() {
     { label: "HCCL buffer", value: result.hccl, color: "var(--blue)", display: formatGiB(result.hccl) },
     { label: "ACLGraph 占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
     { label: "CANN + PTA + 算子", value: result.cann, color: "var(--green)", display: formatGiB(result.cann) },
-    { label: "Device OS", value: result.deviceOS, color: "var(--amber)", display: "4.25 GiB" },
+    { label: "Device OS", value: result.deviceOS, color: "var(--amber)", display: formatGiB(result.deviceOS) },
   ];
 
   return (
@@ -317,18 +360,26 @@ export default function Home() {
               <div className="model-picker-grid">
                 <SelectField
                   label="厂商"
-                  value={vendor.brand}
-                  onChange={(value) => setVendorBrand(value)}
-                  options={MODEL_INDEX.map((v) => ({ value: v.brand, label: `${v.brand}（${v.owner}）` }))}
+                  value={vendorBrand}
+                  onChange={selectVendor}
+                  options={[{ value: "", label: "请按菜单栏开始选择" }, ...MODEL_INDEX.map((v) => ({ value: v.brand, label: `${v.brand}（${v.owner}）` }))]}
+                />
+                <SelectField
+                  label="模型"
+                  value={modelName}
+                  onChange={selectModel}
+                  options={modelOptions}
+                  disabled={!vendor}
                 />
                 <SelectField
                   label="权重"
                   value={weightKey}
                   onChange={(value) => setWeightKey(value)}
                   options={weightList.map((w) => ({ value: `${w.owner}/${w.name}`, label: `${w.owner}/${w.name}` }))}
+                  disabled={!vendor}
                 />
               </div>
-              <p className="field-note">权重数据实时从 ModelScope 拉取 config 与 safetensors 头部，逐张量计算。</p>
+              <p className="field-note">权重数据实时从 ModelScope 拉取。</p>
             </fieldset>
 
             {loading && <p className="field-note">正在拉取 {weight?.owner}/{weight?.name} 的权重清单…</p>}
@@ -405,26 +456,32 @@ export default function Home() {
               <div className="hero-copy">
                 <span className="eyebrow">ESTIMATED PER DEVICE</span>
                 <div className="total-line"><strong>{formatGiB(result.total).replace(" GiB", "")}</strong><span>GiB</span></div>
-                <p>{weightResult ? "单卡总显存预估（含权重）" : "加载权重数据后显示完整预估"}</p>
+                <p>{weightResult ? "单卡总显存预估（含权重）" : weight ? "加载权重数据后显示完整预估" : "请先选择厂商与权重"}</p>
               </div>
             </article>
 
             <article className="model-context-card">
               <div className="model-identity">
                 <span className="eyebrow">ACTIVE MODEL</span>
-                <strong>{weight ? `${weight.owner}/${weight.name}` : "—"}</strong>
+                {weight ? (
+                  <a className="model-link" href={`https://modelscope.cn/models/${weight.owner}/${weight.name}`} target="_blank" rel="noreferrer">
+                    {weight.owner}/{weight.name}
+                  </a>
+                ) : (
+                  <strong className="model-link model-link-empty">尚未选择权重</strong>
+                )}
               </div>
               {struct ? (
-                <>
+                <div className="model-facts">
                   <div className="model-fact"><span>Hidden size</span><strong>{struct.hiddenSize.toLocaleString("zh-CN")}</strong></div>
                   <div className="model-fact"><span>层数</span><strong>{struct.numLayers.toLocaleString("zh-CN")}</strong></div>
                   <div className="model-fact"><span>专家总数</span><strong>{struct.expertCount.toLocaleString("zh-CN")}</strong><small>{struct.expertCount > 0 ? "MoE" : "Dense"}</small></div>
                   <div className="model-fact"><span>TopK 专家</span><strong>{struct.topK.toLocaleString("zh-CN")}</strong></div>
                   <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
                   <div className="model-fact"><span>本地专家数</span><strong>{result.localExperts.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong></div>
-                </>
+                </div>
               ) : (
-                <p className="field-note">{loading ? "加载中…" : "尚未加载"}</p>
+                <p className="field-note">{loading ? "加载中…" : "请选择权重"}</p>
               )}
             </article>
 
@@ -508,7 +565,7 @@ export default function Home() {
                 <DetailSection title="其他运行时" value={result.graph + result.cann + result.deviceOS} tone="violet">
                   <DetailRow label={`ACLGraph 占用（${inputs.graphCount} 张）`} value={result.graph} formula={`${inputs.graphCount} ÷ 5 × 0.27 GB`} />
                   <DetailRow label="CANN + PTA + 算子" value={result.cann} formula={`${inputs.cannGB} GiB 预估值`} />
-                  <DetailRow label="Device OS 固定占用" value={result.deviceOS} formula="4.25 × 1024³ bytes = 4.25 GiB" />
+                  <DetailRow label="Device OS 固定占用" value={result.deviceOS} formula="4.25 × 1024³ bytes（固定值）" />
                 </DetailSection>
               </div>
             </article>
@@ -530,11 +587,11 @@ function NumberField({ label, value, onChange, step = "1" }: { label: string; va
   );
 }
 
-function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[] }) {
+function SelectField({ label, value, onChange, options, disabled = false }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[]; disabled?: boolean }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <select value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>
     </label>

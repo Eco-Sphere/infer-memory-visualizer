@@ -23,18 +23,18 @@ test("server-renders the inference memory planner shell", async () => {
   assert.match(html, /推理显存建模/);
   assert.match(html, /模型与负载/);
   assert.match(html, /模型配置/);
-  // 一级厂商下拉与二级权重下拉（静态 MODEL_INDEX 可服务端渲染）
+  // 一级厂商下拉与「请按菜单栏开始选择」占位（静态 MODEL_INDEX 可服务端渲染）
   assert.match(html, /DeepSeek（deepseek-ai）/);
-  assert.match(html, /deepseek-ai\/DeepSeek-Math-V2/);
-  // 权重数据为客户端动态拉取，SSR 阶段显示占位
-  assert.match(html, /尚未加载|加载权重数据后显示完整预估/);
+  assert.match(html, /请按菜单栏开始选择/);
+  // 初始不加载权重，SSR 阶段显示空态文案
+  assert.match(html, /请先选择厂商与权重/);
+  assert.match(html, /尚未选择权重|请选择权重/);
   // 不依赖权重数据的运行时项仍可服务端渲染
   assert.match(html, /HCCL buffer/);
   assert.match(html, /EP buffer/);
   assert.match(html, /MC2 buffer/);
   assert.match(html, /CANN \+ PTA \+ 算子/);
   assert.match(html, /Device OS/);
-  assert.match(html, /4\.25 GiB/);
   assert.match(html, /我要贡献/);
   assert.match(html, /infer-memory-visualizer\/blob\/main\/CONTRIBUTING\.md/);
   assert.match(html, /<strong>\d+\.\d{2}<\/strong><span>GiB<\/span>/);
