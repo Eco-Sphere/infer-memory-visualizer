@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MODEL_INDEX, QUANT_OWNER, kvCacheModelIdOf, type Vendor } from "./model-index";
 import { CACHE_PRECISIONS, calculateKvCache, getKvCacheModelInfo, type CachePrecision } from "./kv-cache-model";
-import { fetchModelWeightData, getCachedModelWeightData, type ModelWeightData } from "./modelscope";
+import { fetchModelWeightData, type ModelWeightData } from "./modelscope";
 import { calculateWeightFromTensors, type TensorModule } from "./weight-calc";
 
 type Inputs = {
@@ -158,10 +158,8 @@ export default function Home() {
       return;
     }
     let cancelled = false;
-    // 命中会话缓存时无需清空旧数据（直接同步替换、无闪烁）；仅在需要联网时清空。
-    if (!getCachedModelWeightData(weight.owner, weight.name)) {
-      setModelData(null);
-    }
+    // 切换权重时总是先清空，避免上一权重数据在加载期间被「预填充」到新权重上。
+    setModelData(null);
     setLoading(true);
     setError(undefined);
     (async () => {
@@ -204,8 +202,8 @@ export default function Home() {
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
 
   const result = useMemo(() => {
-    // 未选择权重时，所有占用显示为 0（仅有 attentionTp 保留给高级切分显示）。
-    const active = weightKey ? 1 : 0;
+    // 仅在「已选权重 且 权重数据已加载」后显示非零占用；加载期间保持全 0，避免预填充。
+    const active = weightKey && struct ? 1 : 0;
     const H = struct?.hiddenSize ?? 0;
     const T = safe(inputs.maxBatchedTokens);
     const dp = Math.max(1, safe(inputs.dpSize, 1));
