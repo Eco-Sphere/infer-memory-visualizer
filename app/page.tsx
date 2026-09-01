@@ -115,40 +115,33 @@ export default function Home() {
     [vendorBrand],
   );
   const modelOptions = useMemo(
-    () => (vendor ? vendor.models.map((m) => ({ value: m.name, label: m.name })) : []),
+    () => (vendor
+      ? [{ value: "", label: "请选择模型" }, ...vendor.models.map((m) => ({ value: m.name, label: m.name }))]
+      : []),
     [vendor],
   );
   const weightList = useMemo(
-    () => (vendor ? modelWeightOptions(vendor, modelName) : []),
+    () => (vendor && modelName ? modelWeightOptions(vendor, modelName) : []),
     [vendor, modelName],
+  );
+  const weightOptions = useMemo(
+    () => (vendor && modelName
+      ? [{ value: "", label: "请选择权重" }, ...weightList.map((w) => ({ value: `${w.owner}/${w.name}`, label: `${w.owner}/${w.name}` }))]
+      : []),
+    [vendor, modelName, weightList],
   );
   const weight = weightList.find((w) => `${w.owner}/${w.name}` === weightKey);
 
+  // 每一级都不自动预选下一级：只有用户在三级明确选择了某个权重后，才触发加载。
   const selectVendor = (brand: string) => {
     setVendorBrand(brand);
-    if (!brand) {
-      setModelName("");
-      setWeightKey("");
-      return;
-    }
-    const next = MODEL_INDEX.find((v) => v.brand === brand);
-    const first = next?.models[0];
-    if (next && first) {
-      setModelName(first.name);
-      setWeightKey(`${next.owner}/${first.name}`);
-    } else {
-      setModelName("");
-      setWeightKey("");
-    }
+    setModelName("");
+    setWeightKey("");
   };
 
   const selectModel = (name: string) => {
     setModelName(name);
-    if (vendor && name) {
-      setWeightKey(`${vendor.owner}/${name}`);
-    } else {
-      setWeightKey("");
-    }
+    setWeightKey("");
   };
 
   const [modelData, setModelData] = useState<ModelWeightData | null>(null);
@@ -375,8 +368,8 @@ export default function Home() {
                   label="权重"
                   value={weightKey}
                   onChange={(value) => setWeightKey(value)}
-                  options={weightList.map((w) => ({ value: `${w.owner}/${w.name}`, label: `${w.owner}/${w.name}` }))}
-                  disabled={!vendor}
+                  options={weightOptions}
+                  disabled={!vendor || !modelName}
                 />
               </div>
               <p className="field-note">权重数据实时从 ModelScope 拉取。</p>
