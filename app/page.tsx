@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MODEL_INDEX, QUANT_OWNER, kvCacheModelIdOf, type Vendor } from "./model-index";
 import { CACHE_PRECISIONS, calculateKvCache, getKvCacheModelInfo, type CachePrecision } from "./kv-cache-model";
-import { fetchModelWeightData, type ModelWeightData } from "./modelscope";
+import { fetchModelWeightData, type ModelWeightData, type WeightLoadProgress } from "./modelscope";
 import { calculateWeightFromTensors, type TensorModule } from "./weight-calc";
 
 type Inputs = {
@@ -147,6 +147,7 @@ export default function Home() {
   const [modelData, setModelData] = useState<ModelWeightData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const [progress, setProgress] = useState<WeightLoadProgress | null>(null);
 
   // 仅在切换权重时拉取数据（结果由 fetchModelWeightData 会话内缓存）；
   // 并行参数变化不在此依赖中，因此不会触发任何网络请求。
@@ -155,6 +156,7 @@ export default function Home() {
       setModelData(null);
       setLoading(false);
       setError(undefined);
+      setProgress(null);
       return;
     }
     let cancelled = false;
@@ -162,17 +164,22 @@ export default function Home() {
     setModelData(null);
     setLoading(true);
     setError(undefined);
+    setProgress(null);
     (async () => {
       try {
-        const data = await fetchModelWeightData(weight.owner, weight.name);
+        const data = await fetchModelWeightData(weight.owner, weight.name, "master", (p) => {
+          if (!cancelled) setProgress(p);
+        });
         if (!cancelled) {
           setModelData(data);
           setLoading(false);
+          setProgress(null);
         }
       } catch (e) {
         if (!cancelled) {
           setError((e as Error).message);
           setLoading(false);
+          setProgress(null);
         }
       }
     })();
@@ -463,14 +470,30 @@ export default function Home() {
                 )}
               </div>
               {struct ? (
-                <div className="model-facts">
-                  <div className="model-fact"><span>Hidden size</span><strong>{struct.hiddenSize.toLocaleString("zh-CN")}</strong></div>
-                  <div className="model-fact"><span>层数</span><strong>{struct.numLayers.toLocaleString("zh-CN")}</strong></div>
-                  <div className="model-fact"><span>专家总数</span><strong>{struct.expertCount.toLocaleString("zh-CN")}</strong><small>{struct.expertCount > 0 ? "MoE" : "Dense"}</small></div>
-                  <div className="model-fact"><span>TopK 专家</span><strong>{struct.topK.toLocaleString("zh-CN")}</strong></div>
-                  <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
-                  <div className="model-fact"><span>本地专家数</span><strong>{result.localExperts.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong></div>
-                </div>
+                <>
+                  <div className="model-facts">
+                    <div className="model-fact"><span>Hidden size</span><strong>{struct.hiddenSize.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>层数</span><strong>{struct.numLayers.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>专家总数</span><strong>{struct.expertCount.toLocaleString("zh-CN")}</strong><small>{struct.expertCount > 0 ? "MoE" : "Dense"}</small></div>
+                    <div className="model-fact"><span>TopK 专家</span><strong>{struct.topK.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
+                    <div className="model-fact"><span>本地专家数</span><strong>{result.localExperts.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong></div>
+                  </div>
+                  {modelData?.optionalShards && modelData.optionalShards.length > 0 && (
+                    <p className="field-note">已并入可选权重：{modelData.optionalShards.join("、")}</p>
+                  )}
+                </>
+              ) : loading && progress ? (
+                progress.phase === "shards" ? (
+                  <div className="load-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
+                    <div className="load-progress-track">
+                      <div className="load-progress-fill" style={{ width: `${progress.total ? Math.round((progress.done / progress.total) * 100) : 0}%` }} />
+                    </div>
+                    <span>加载权重分片 {progress.done}/{progress.total}</span>
+                  </div>
+                ) : (
+                  <p className="field-note">正在加载权重索引…</p>
+                )
               ) : (
                 <p className="field-note">{loading ? "加载中…" : "请选择权重"}</p>
               )}

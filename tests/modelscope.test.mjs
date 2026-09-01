@@ -92,3 +92,43 @@ test("拉取失败不缓存，重试仍会发起请求", async () => {
     globalThis.fetch = original;
   }
 });
+
+test("探测并计入可选权重，且按阶段上报加载进度", async () => {
+  const optionalHeader = makeHeaderFile({ "global_rotation": { dtype: "F32", shape: [3, 3], data_offsets: [0, 36] } });
+  const restore = mountFetchExtra(optionalHeader);
+
+  const events = [];
+  try {
+    const data = await fetchModelWeightData("TestOwner", "OptionalModel", "master", (p) => events.push(p));
+
+    // 可选权重已并入分片列表与张量清单
+    assert.equal(data.shardCount, 2);
+    assert.deepEqual(data.optionalShards, ["optional/quarot.safetensors"]);
+    assert.equal(data.tensors.length, 2);
+    assert.ok(data.tensors.some((t) => t.name === "global_rotation"));
+
+    // 进度：先 index 阶段，再 shards 阶段，且 shards 以 done=total 收尾
+    assert.ok(events.some((p) => p.phase === "index"), "应上报 index 阶段");
+    const shardEvents = events.filter((p) => p.phase === "shards");
+    assert.ok(shardEvents.length >= 1, "应上报 shards 阶段");
+    const last = shardEvents[shardEvents.length - 1];
+    assert.equal(last.total, 2);
+    assert.equal(last.done, 2);
+  } finally {
+    restore();
+  }
+});
+
+function mountFetchExtra(optionalHeader) {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    const u = String(input);
+    if (u.includes("config.json")) return new Response(JSON.stringify(CONFIG), { status: 200, headers: { "content-type": "application/json" } });
+    if (u.includes("safetensors.index.json")) return new Response(JSON.stringify({ weight_map: { "a.weight": "a.safetensors" } }), { status: 200 });
+    if (u.includes("optional/quarot.safetensors")) return new Response(optionalHeader, { status: 206 });
+    if (u.includes("quarot.safetensors")) return new Response("not found", { status: 404 });
+    if (u.includes("a.safetensors")) return new Response(HEADER_A, { status: 206 });
+    return new Response("not found", { status: 404 });
+  });
+  return () => { globalThis.fetch = original; };
+}

@@ -132,6 +132,10 @@ legend { margin-bottom: 10px; padding: 0; color: var(--muted); font-size: 11px; 
 .model-fact span, .model-fact small { display: block; color: var(--muted); font-size: 9px; }
 .model-fact strong { display: block; margin-top: 2px; font-size: 15px; font-variant-numeric: tabular-nums; }
 .model-fact small { margin-top: 1px; font-size: 8px; }
+.load-progress { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.load-progress-track { flex: 1; height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.load-progress-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #477866, #6aa98e); transition: width 120ms ease; }
+.load-progress span { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .metric-card { min-width: 0; padding: 15px; border-radius: 13px; }
 .metric-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }

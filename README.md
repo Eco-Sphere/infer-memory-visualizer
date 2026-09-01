@@ -14,7 +14,7 @@
 
 1. **一级选择厂商**：下拉默认显示 `厂商（owner）`，例如 `DeepSeek（deepseek-ai）`、`Ling（inclusionAI）`、`Ring（inclusionAI）`。
 2. **二级选择权重**：列出该厂商下的**原始权重**（`deepseek-ai/DeepSeek-V3.1`）及其 **Eco-Tech 量化权重**（`Eco-Tech/DeepSeek-V3.1-w4a8-mtp-QuaRot`），原始权重按字母序、量化权重紧跟在所属原始权重之下按字母序排列。
-3. 选中后页面自动拉取该权重的 `config.json`（结构参数）与全部 `safetensors` 分片头部（逐张量 `dtype × shape`），并计算单卡权重占用。
+3. 选中后页面自动拉取该权重的 `config.json`（结构参数）与全部 `safetensors` 分片头部（逐张量 `dtype × shape`），加载期间按「已接收分片数 / 总分片数」显示进度条，完成后计算单卡权重占用。
 4. 配置 DP / TP / EP 及高级切分（Attention、O-Proj、Embedding、LM Head、Shared Expert 的独立 TP），设置 batch、KV Cache 精度与运行时开销，实时查看各部分占比与总显存。
 
 ## 功能
@@ -22,7 +22,7 @@
 - 按「厂商 → 原始权重 / 量化权重」两级选择，覆盖 DeepSeek、GLM、Qwen、Kimi、MiniMax、Step、Ling、Ring、Hunyuan、InternVL 等厂商。
 - 动态从 ModelScope 拉取结构参数与权重张量清单，无需内置写死的模型参数。
 - 逐张量计算权重显存（全量精确），并按模块通用切分估算单卡权重。
-- 已拉取的权重清单在会话内缓存：切换权重（含切回看过的权重）复用缓存，调整 DP/TP 等并行参数只重算切分、不重复请求；分片 header 并发拉取。
+- 已拉取的权重清单在会话内缓存：切换权重（含切回看过的权重）复用缓存，调整 DP/TP 等并行参数只重算切分、不重复请求；分片 header 并发拉取，并按「已接收分片数 / 总分片数」实时上报进度条。
 - 支持 `w*a*` 量化权重（含 INT8/INT4 及 `mxfp8`/`mxfp4` 的 payload + scale）与原始 BF16/FP8 权重。
 - 估算激活值、HCCL buffer、ACLGraph、CANN/PTA/算子与 Device OS 开销。
 - 对 `kv-cache-calculator` 已收录的模型，独立配置 KV Cache 与 Index Cache 的上下文长度、序列数和精度。
@@ -62,6 +62,12 @@
 ### 权重清单来源
 
 量化权重清单来自 ModelScope 上的 Eco-Tech 仓库，经过选型过滤后静态维护在 [`app/model-index.ts`](./app/model-index.ts) 中：只保留 `w*a*` 量化，并排除 `xllm`、`mindie`、`310`、`eagle`、`pdmix`/`nopdmix`、`LAOS` 等非通用或硬件专属版本。原始权重的 owner 通过厂商前缀映射（如 `DeepSeek-*`、`GLM-*`、`Ling-*`/`Ring-*`）。
+
+分片列表通过 `model.safetensors.index.json` 的 `weight_map` 推导（ModelScope 的 `repo/files` 列表 API 无 CORS 头，纯浏览器静态部署无法直接使用）；同时额外探测不在 `weight_map` 里的「可选附加权重」（如 QuaRot 的 `optional/quarot.safetensors` 全局旋转矩阵），命中则并入分片列表与张量清单，避免漏算这部分显存。加载进度条的分母即为「主分片 + 可选权重」的总文件数。
+
+### 加载进度
+
+加载分为两个阶段：先定位并读取权重的 `config.json` 与索引（此时显示「正在加载权重索引…」），随后并发拉取各 safetensors 分片 header，并按「已接收分片数 / 总分片数」在 ACTIVE MODEL 卡片的参数行处显示读条。
 
 ### 其余开销
 

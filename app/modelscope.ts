@@ -46,6 +46,14 @@ const INDEX_CANDIDATES = [
   "pytorch_model.safetensors.index.json",
 ];
 
+// 「可选附加权重」文件：不在 index.json 的 weight_map 里，但推理时同样会加载，
+// 例如 QuaRot 的全局旋转矩阵（optional/quarot.safetensors）。用 8 字节 Range 探测
+// 是否存在，命中则并入分片列表，避免漏算这部分显存。
+const OPTIONAL_WEIGHT_CANDIDATES = [
+  "optional/quarot.safetensors",
+  "quarot.safetensors",
+];
+
 /**
  * 定位模型的所有 safetensors 分片文件名。
  * 权重分片列表无法走 ModelScope 的 repo/files 列表 API（该 API 无 CORS 头），
@@ -93,6 +101,28 @@ export async function fetchSafetensorsShards(
 }
 
 /**
+ * 探测并返回存在的「可选附加权重」文件。只用 8 字节 Range 判断存在性，
+ * 不下载文件体，成本远低于一次完整 GET。
+ */
+async function fetchOptionalShards(
+  owner: string,
+  name: string,
+  ref = "master",
+): Promise<string[]> {
+  const found: string[] = [];
+  await mapWithConcurrency(OPTIONAL_WEIGHT_CANDIDATES, OPTIONAL_WEIGHT_CANDIDATES.length, async (file) => {
+    const url = modelscopeResolveUrl(owner, name, file, ref);
+    try {
+      const res = await fetch(url, { headers: { Range: "bytes=0-7" } });
+      if (res.ok) found.push(file);
+    } catch {
+      // 忽略探测失败（不存在或网络错误），视为无该可选权重。
+    }
+  });
+  return found;
+}
+
+/**
  * 只拉取 safetensors 文件的头部（header JSON），不下载整个权重。
  * 先用一次「8 字节长度字段 + 1 MiB 余量」的 Range 覆盖常见 header，避免两次串行
  * 请求；仅当 header 声明长度超过该余量时，才回退到精确范围再拉一次。
@@ -130,7 +160,16 @@ export type ModelWeightData = {
   struct: ModelStructure;
   tensors: SafetensorInfo[];
   shardCount: number;
+  optionalShards: string[];
 };
+
+/** 权重加载进度：index 阶段总数为 0（未知）；shards 阶段 done/total 为已拉取分片数。 */
+export type WeightLoadProgress = {
+  phase: "index" | "shards";
+  done: number;
+  total: number;
+};
+export type WeightProgressCallback = (progress: WeightLoadProgress) => void;
 
 function modelDataCacheKey(owner: string, name: string): string {
   return `${owner}/${name}`;
@@ -165,11 +204,14 @@ export function getCachedModelWeightData(owner: string, name: string): ModelWeig
 /**
  * 拉取并解析某个权重的结构参数与全部张量清单，带会话内内存缓存与在途去重：
  * 首次拉取的网络结果会被缓存，后续（含切回已看过的权重）直接复用，不再请求。
+ * 可选 onProgress 会在「拉索引」与「拉分片 header」两个阶段上报进度：
+ * 命中缓存时不会调用 onProgress（数据同步返回）。
  */
 export function fetchModelWeightData(
   owner: string,
   name: string,
   ref = "master",
+  onProgress?: WeightProgressCallback,
 ): Promise<ModelWeightData> {
   const key = modelDataCacheKey(owner, name);
   const cached = dataCache.get(key);
@@ -178,14 +220,23 @@ export function fetchModelWeightData(
   if (pending) return pending;
 
   const promise = (async () => {
+    onProgress?.({ phase: "index", done: 0, total: 0 });
     const config = await fetchConfigJson(owner, name, ref);
     const struct = extractModelStructure(config);
-    const shards = await fetchSafetensorsShards(owner, name, ref);
-    const headers = await mapWithConcurrency(shards, CONCURRENCY, (shard) =>
-      fetchSafetensorsHeader(owner, name, shard, ref),
-    );
+    const mainShards = await fetchSafetensorsShards(owner, name, ref);
+    const optionalShards = await fetchOptionalShards(owner, name, ref);
+    const shards = [...mainShards, ...optionalShards];
+
+    let done = 0;
+    onProgress?.({ phase: "shards", done: 0, total: shards.length });
+    const headers = await mapWithConcurrency(shards, CONCURRENCY, async (shard) => {
+      const header = await fetchSafetensorsHeader(owner, name, shard, ref);
+      done += 1;
+      onProgress?.({ phase: "shards", done, total: shards.length });
+      return header;
+    });
     const tensors = headers.flatMap((header) => header.tensors);
-    return { struct, tensors, shardCount: shards.length } satisfies ModelWeightData;
+    return { struct, tensors, shardCount: shards.length, optionalShards } satisfies ModelWeightData;
   })();
 
   pendingCache.set(key, promise);
