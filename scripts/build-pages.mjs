@@ -1,6 +1,5 @@
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 
-const root = new URL("../", import.meta.url);
 const output = new URL("../pages-dist/", import.meta.url);
 const client = new URL("../dist/client/", import.meta.url);
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);

@@ -31,7 +31,7 @@ const HEADER_B = makeHeaderFile({ "b.weight": { dtype: "F32", shape: [64, 64], d
 
 function mountFetch(onCall) {
   const original = globalThis.fetch;
-  globalThis.fetch = (async (input, _init) => {
+  globalThis.fetch = (async (input) => {
     onCall?.();
     const u = String(input);
     if (u.includes("config.json")) {

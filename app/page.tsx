@@ -152,6 +152,9 @@ export default function Home() {
   // 仅在切换权重时拉取数据（结果由 fetchModelWeightData 会话内缓存）；
   // 并行参数变化不在此依赖中，因此不会触发任何网络请求。
   useEffect(() => {
+    // 切换权重时需同步清空旧数据并进入加载态，避免上一权重数据被「预填充」到新权重上。
+    // 这是数据获取 effect 的必要同步重置（非级联渲染反模式），故显式对本规则豁免。
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (!weight) {
       setModelData(null);
       setLoading(false);
@@ -160,11 +163,11 @@ export default function Home() {
       return;
     }
     let cancelled = false;
-    // 切换权重时总是先清空，避免上一权重数据在加载期间被「预填充」到新权重上。
     setModelData(null);
     setLoading(true);
     setError(undefined);
     setProgress(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
     (async () => {
       try {
         const data = await fetchModelWeightData(weight.owner, weight.name, "master", (p) => {
@@ -186,7 +189,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [weightKey]);
+  }, [weightKey, weight]);
 
   const struct = modelData?.struct;
 

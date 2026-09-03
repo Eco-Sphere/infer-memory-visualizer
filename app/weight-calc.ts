@@ -139,13 +139,13 @@ export function calculateWeightFromTensors(
   let fullWeight = 0;
 
   for (const t of tensors) {
-    const module = classifyTensor(t.name);
+    const tensorModule = classifyTensor(t.name);
     const bytes = t.bytes || 0;
     fullWeight += bytes;
-    const b = breakdown[module];
+    const b = breakdown[tensorModule];
     b.full += bytes;
     b.tensors += 1;
-    b.perDevice += bytes / divisorFor(module, t.name);
+    b.perDevice += bytes / divisorFor(tensorModule, t.name);
   }
 
   const perDeviceWeight = Object.values(breakdown).reduce((s, b) => s + b.perDevice, 0);
