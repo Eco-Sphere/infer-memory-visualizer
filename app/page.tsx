@@ -1,16 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { DEFAULT_MODEL_ID, MODELS } from "./models";
+import { useEffect, useMemo, useState } from "react";
+import { MODEL_INDEX, QUANT_OWNER, kvCacheModelIdOf, type Vendor } from "./model-index";
 import { CACHE_PRECISIONS, calculateKvCache, getKvCacheModelInfo, type CachePrecision } from "./kv-cache-model";
-import { calculateMiniMaxWeight } from "./weight-model";
+import { fetchModelWeightData, type ModelWeightData, type WeightLoadProgress } from "./modelscope";
+import { calculateWeightFromTensors, type TensorModule } from "./weight-calc";
 
 type Inputs = {
   maxBatchedTokens: number;
   dpSize: number;
   tpSize: number;
-  // null means the projection follows the main TP size, mirroring vLLM's
-  // default of sharding over the global TP group.
   attentionTpSize: number | null;
   oprojTpSize: number | null;
   embeddingTpSize: number | null;
@@ -53,6 +52,19 @@ const align = (value: number, boundary: number) =>
   Math.ceil(value / boundary) * boundary;
 const align480To512 = (value: number) => Math.ceil(value / 480) * 512;
 
+const MODULE_LABEL: Record<TensorModule, string> = {
+  routed_expert: "路由专家",
+  shared_expert: "共享专家",
+  dense_mlp: "Dense MLP",
+  attention: "Attention",
+  embedding: "Embedding",
+  lm_head: "LM Head",
+  router: "Router",
+  norm: "Norm",
+  vision: "视觉塔",
+  other: "其他",
+};
+
 function formatGiB(bytes: number) {
   return `${(bytes / GIB).toLocaleString("zh-CN", {
     minimumFractionDigits: 2,
@@ -74,28 +86,145 @@ function safe(value: number, fallback = 0) {
   return Number.isFinite(value) ? Math.max(0, value) : fallback;
 }
 
+/** 某个原始权重（模型）下的全部权重选项：原始权重 + 其 Eco-Tech 量化权重。 */
+function modelWeightOptions(vendor: Vendor, modelName: string): { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] {
+  const model = vendor.models.find((m) => m.name === modelName);
+  if (!model) return [];
+  const out: { owner: string; name: string; kind: "raw" | "quantized"; rawName: string }[] = [
+    { owner: vendor.owner, name: model.name, kind: "raw", rawName: model.name },
+  ];
+  for (const q of model.quantized) {
+    out.push({ owner: QUANT_OWNER, name: q, kind: "quantized", rawName: model.name });
+  }
+  return out;
+}
+
 export default function Home() {
   const [inputs, setInputs] = useState(DEFAULTS);
-  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
   const [dark, setDark] = useState(false);
-  const model = MODELS.find((item) => item.id === modelId) ?? MODELS[0];
-  const families = Array.from(new Set(MODELS.map((item) => item.family)));
-  const [family, setFamily] = useState(model.family);
-  const familyModels = MODELS.filter((item) => item.family === family);
+
+  // 一级：厂商（空串表示「请按菜单栏开始选择」占位，不加载任何权重）
+  const [vendorBrand, setVendorBrand] = useState<string>("");
+  // 二级：模型（原始权重名）
+  const [modelName, setModelName] = useState<string>("");
+  // 三级：权重（owner/name）
+  const [weightKey, setWeightKey] = useState<string>("");
+
+  const vendor = useMemo(
+    () => (vendorBrand ? MODEL_INDEX.find((v) => v.brand === vendorBrand) : undefined),
+    [vendorBrand],
+  );
+  const modelOptions = useMemo(
+    () => (vendor
+      ? [{ value: "", label: "请选择模型" }, ...vendor.models.map((m) => ({ value: m.name, label: m.name }))]
+      : []),
+    [vendor],
+  );
+  const weightList = useMemo(
+    () => (vendor && modelName ? modelWeightOptions(vendor, modelName) : []),
+    [vendor, modelName],
+  );
+  const weightOptions = useMemo(
+    () => (vendor && modelName
+      ? [{ value: "", label: "请选择权重" }, ...weightList.map((w) => ({ value: `${w.owner}/${w.name}`, label: `${w.owner}/${w.name}` }))]
+      : []),
+    [vendor, modelName, weightList],
+  );
+  const weight = weightList.find((w) => `${w.owner}/${w.name}` === weightKey);
+
+  // 每一级都不自动预选下一级：只有用户在三级明确选择了某个权重后，才触发加载。
+  const selectVendor = (brand: string) => {
+    setVendorBrand(brand);
+    setModelName("");
+    setWeightKey("");
+  };
+
+  const selectModel = (name: string) => {
+    setModelName(name);
+    setWeightKey("");
+  };
+
+  const [modelData, setModelData] = useState<ModelWeightData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const [progress, setProgress] = useState<WeightLoadProgress | null>(null);
+
+  // 仅在切换权重时拉取数据（结果由 fetchModelWeightData 会话内缓存）；
+  // 并行参数变化不在此依赖中，因此不会触发任何网络请求。
+  useEffect(() => {
+    // 切换权重时需同步清空旧数据并进入加载态，避免上一权重数据被「预填充」到新权重上。
+    // 这是数据获取 effect 的必要同步重置（非级联渲染反模式），故显式对本规则豁免。
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (!weight) {
+      setModelData(null);
+      setLoading(false);
+      setError(undefined);
+      setProgress(null);
+      return;
+    }
+    let cancelled = false;
+    setModelData(null);
+    setLoading(true);
+    setError(undefined);
+    setProgress(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
+    (async () => {
+      try {
+        const data = await fetchModelWeightData(weight.owner, weight.name, "master", (p) => {
+          if (!cancelled) setProgress(p);
+        });
+        if (!cancelled) {
+          setModelData(data);
+          setLoading(false);
+          setProgress(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError((e as Error).message);
+          setLoading(false);
+          setProgress(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [weightKey, weight]);
+
+  const struct = modelData?.struct;
+
+  // 权重切分仅依赖已缓存的张量清单与并行参数：改 DP/TP 时只重算、不重拉。
+  const weightResult = useMemo(() => {
+    if (!modelData) return null;
+    const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
+    return calculateWeightFromTensors(modelData.tensors, {
+      tp,
+      ep: tp * Math.max(1, Math.floor(safe(inputs.dpSize, 1))),
+      attentionTp: Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1))),
+      oprojTp: Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? tp, 1))),
+      embeddingTp: Math.max(1, Math.floor(safe(inputs.embeddingTpSize ?? tp, 1))),
+      lmHeadTp: Math.max(1, Math.floor(safe(inputs.lmHeadTpSize ?? tp, 1))),
+      sharedExpertTp: Math.max(1, Math.floor(safe(inputs.sharedExpertTpSize, 1))),
+    });
+  }, [modelData, inputs.tpSize, inputs.dpSize, inputs.attentionTpSize, inputs.oprojTpSize, inputs.embeddingTpSize, inputs.lmHeadTpSize, inputs.sharedExpertTpSize]);
+
+  const kvCacheModelId = weight ? kvCacheModelIdOf(weight.rawName) : undefined;
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
-  const localExpertNum = model.expertCount / epSize;
 
   const result = useMemo(() => {
-    const H = model.hiddenSize;
+    // 仅在「已选权重 且 权重数据已加载」后显示非零占用；加载期间保持全 0，避免预填充。
+    const active = weightKey && struct ? 1 : 0;
+    const H = struct?.hiddenSize ?? 0;
     const T = safe(inputs.maxBatchedTokens);
     const dp = Math.max(1, safe(inputs.dpSize, 1));
     const ep = epSize;
-    const K = model.topK;
-    const localExperts = localExpertNum;
+    const K = struct?.topK ?? 0;
+    const expertCount = struct?.expertCount ?? 0;
+    const localExperts = expertCount > 0 && ep > 0 ? expertCount / ep : 0;
     const maxBS = safe(inputs.maxBS);
 
     const hiddenResidual = 2 * 2 * T * H;
-    const moeBuffers = 4 * 2 * dp * T * K / ep * H;
+    const moeBuffers = K > 0 ? 4 * 2 * dp * T * K / ep * H : 0;
     const activation = hiddenResidual + moeBuffers;
 
     const hcclDP = Math.max(Math.ceil(((dp + 1) * 4) / 1024 ** 2), 50) * 2 * MB;
@@ -111,65 +240,12 @@ export default function Home() {
     const graph = (safe(inputs.graphCount) / 5) * 0.27 * GB;
     const cann = safe(inputs.cannGB) * GIB;
     const deviceOS = 4.25 * GIB;
-    const profile = model.weightProfile;
-    const kvCacheInfo = model.kvCacheModelId
-      ? getKvCacheModelInfo(model.kvCacheModelId)
-      : undefined;
+
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
     const attentionTp = Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1)));
-    const oprojTp = Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? tp, 1)));
-    const embeddingTp = Math.max(1, Math.floor(safe(inputs.embeddingTpSize ?? tp, 1)));
-    const lmHeadTp = Math.max(1, Math.floor(safe(inputs.lmHeadTpSize ?? tp, 1)));
-    const sharedExpertTp = Math.max(1, Math.floor(safe(inputs.sharedExpertTpSize, 1)));
-    const paddedVocab = profile ? align(profile.vocabSize, profile.vocabPaddingSize) : 0;
-    const weightConfigValid = Boolean(
-      profile
-      && model.expertCount % ep === 0
-      && profile.attentionHeads % attentionTp === 0
-      && profile.attentionHeads % oprojTp === 0
-      && (profile.sharedKv || profile.kvHeads % attentionTp === 0)
-      && profile.indexerHeads % attentionTp === 0
-      && profile.denseIntermediateSize % tp === 0
-      && profile.expertIntermediateSize % sharedExpertTp === 0
-      && paddedVocab % embeddingTp === 0
-      && paddedVocab % lmHeadTp === 0
-    );
-
-    let weight = 0;
-    let weightBreakdown = null;
-    let fullWeight = 0;
-    if (profile && weightConfigValid) {
-      weightBreakdown = calculateMiniMaxWeight({
-        profile,
-        hiddenSize: H,
-        expertCount: model.expertCount,
-        tpSize: tp,
-        epSize: ep,
-        attentionTpSize: attentionTp,
-        oprojTpSize: oprojTp,
-        embeddingTpSize: embeddingTp,
-        lmHeadTpSize: lmHeadTp,
-        sharedExpertTpSize: sharedExpertTp,
-        mtpLayers: Math.floor(safe(inputs.mtpLayers)),
-      });
-      weight = weightBreakdown.total;
-      fullWeight = calculateMiniMaxWeight({
-        profile,
-        hiddenSize: H,
-        expertCount: model.expertCount,
-        tpSize: 1,
-        epSize: 1,
-        attentionTpSize: 1,
-        oprojTpSize: 1,
-        embeddingTpSize: 1,
-        lmHeadTpSize: 1,
-        sharedExpertTpSize: 1,
-        mtpLayers: Math.floor(safe(inputs.mtpLayers)),
-      }).total;
-    }
-
-    const kvCacheBreakdown = model.kvCacheModelId ? calculateKvCache({
-      modelId: model.kvCacheModelId,
+    const kvCacheInfo = kvCacheModelId ? getKvCacheModelInfo(kvCacheModelId) : undefined;
+    const kvCacheBreakdown = kvCacheModelId ? calculateKvCache({
+      modelId: kvCacheModelId,
       tokens: safe(inputs.kvCacheTokens, DEFAULTS.kvCacheTokens),
       sequences: safe(inputs.kvCacheSequences, DEFAULTS.kvCacheSequences),
       kvPrecision: inputs.kvPrecision ?? DEFAULTS.kvPrecision,
@@ -179,73 +255,51 @@ export default function Home() {
     }) ?? null : null;
     const kvCache = kvCacheBreakdown?.total ?? 0;
 
+    const weight = weightResult?.perDeviceWeight ?? 0;
+    const fullWeight = weightResult?.fullWeight ?? 0;
     const total = weight + kvCache + activation + hccl + graph + cann + deviceOS;
 
     return {
-      activation,
-      hiddenResidual,
-      moeBuffers,
-      hccl,
-      hcclDP,
-      hcclTP,
-      hcclEP,
-      hcclMC2,
-      epDispatch: 2 * epDispatch,
-      epCombine: 2 * epCombine,
-      alignedDispatch,
-      alignedCombine,
-      attentionTp,
-      oprojTp,
-      embeddingTp,
-      lmHeadTp,
-      sharedExpertTp,
-      graph,
-      cann,
-      deviceOS,
-      weight,
-      fullWeight,
-      kvCache,
-      kvCacheBreakdown,
-      kvCacheInfo,
-      weightBreakdown,
-      weightConfigValid,
-      total,
+      activation: active * activation,
+      hiddenResidual: active * hiddenResidual,
+      moeBuffers: active * moeBuffers,
+      hccl: active * hccl,
+      hcclDP: active * hcclDP,
+      hcclTP: active * hcclTP,
+      hcclEP: active * hcclEP,
+      hcclMC2: active * hcclMC2,
+      epDispatch: active * 2 * epDispatch,
+      epCombine: active * 2 * epCombine,
+      alignedDispatch: active * alignedDispatch,
+      alignedCombine: active * alignedCombine,
+      attentionTp, graph: active * graph, cann: active * cann, deviceOS: active * deviceOS,
+      weight: active * weight, fullWeight: active * fullWeight, kvCache: active * kvCache,
+      kvCacheBreakdown, kvCacheInfo, weightResult,
+      total: active * total, localExperts,
     };
-  }, [inputs, epSize, localExpertNum, model]);
+  }, [inputs, epSize, struct, weightResult, kvCacheModelId, weightKey]);
 
   const update = (key: keyof Inputs, value: string) => {
     setInputs((current) => ({ ...current, [key]: Number(value) }));
   };
-
   const updateOptional = (key: keyof Inputs, value: string) => {
     setInputs((current) => ({ ...current, [key]: value === "" ? null : Number(value) }));
   };
-
-  const changeFamily = (nextFamily: string) => {
-    const nextModel = MODELS.find((item) => item.family === nextFamily) ?? MODELS[0];
-    setFamily(nextFamily);
-    setModelId(nextModel.id);
-  };
-
-  const changeModel = (nextId: string) => {
-    setModelId(nextId);
-  };
-
   const reset = () => {
-    const defaultModel = MODELS.find((item) => item.id === DEFAULT_MODEL_ID) ?? MODELS[0];
-    setFamily(defaultModel.family);
-    setModelId(defaultModel.id);
+    setVendorBrand("");
+    setModelName("");
+    setWeightKey("");
     setInputs(DEFAULTS);
   };
 
   const categories = [
-    ...(model.weightProfile ? [{ label: "权重占用", value: result.weight, color: "var(--rose)", display: result.weightConfigValid ? formatGiB(result.weight) : "配置无效" }] : []),
-    ...(model.kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
+    ...(weightResult ? [{ label: "权重占用", value: result.weight, color: "var(--rose)", display: formatGiB(result.weight) }] : []),
+    ...(kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
     { label: "激活占用", value: result.activation, color: "var(--coral)", display: formatGiB(result.activation) },
     { label: "HCCL buffer", value: result.hccl, color: "var(--blue)", display: formatGiB(result.hccl) },
     { label: "ACLGraph 占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
     { label: "CANN + PTA + 算子", value: result.cann, color: "var(--green)", display: formatGiB(result.cann) },
-    { label: "Device OS", value: result.deviceOS, color: "var(--amber)", display: "4.25 GiB" },
+    { label: "Device OS", value: result.deviceOS, color: "var(--amber)", display: formatGiB(result.deviceOS) },
   ];
 
   return (
@@ -262,25 +316,13 @@ export default function Home() {
             </div>
           </div>
           <div className="top-actions">
-            <a
-              className="top-link"
-              href="https://github.com/Eco-Sphere/infer-memory-visualizer"
-              target="_blank"
-              rel="noreferrer"
-              aria-label="GitHub 仓库"
-            >
+            <a className="top-link" href="https://github.com/Eco-Sphere/infer-memory-visualizer" target="_blank" rel="noreferrer" aria-label="GitHub 仓库">
               <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
               </svg>
               GitHub
             </a>
-            <a
-              className="top-link"
-              href="https://github.com/Eco-Sphere/infer-memory-visualizer/issues/new"
-              target="_blank"
-              rel="noreferrer"
-              aria-label="反馈问题"
-            >
+            <a className="top-link" href="https://github.com/Eco-Sphere/infer-memory-visualizer/issues/new" target="_blank" rel="noreferrer" aria-label="反馈问题">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="9" />
                 <line x1="12" y1="8" x2="12" y2="13" />
@@ -288,13 +330,7 @@ export default function Home() {
               </svg>
               反馈
             </a>
-            <a
-              className="top-link"
-              href="https://github.com/Eco-Sphere/infer-memory-visualizer/blob/main/CONTRIBUTING.md"
-              target="_blank"
-              rel="noreferrer"
-              aria-label="查看贡献指南"
-            >
+            <a className="top-link" href="https://github.com/Eco-Sphere/infer-memory-visualizer/blob/main/CONTRIBUTING.md" target="_blank" rel="noreferrer" aria-label="查看贡献指南">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="6" cy="6" r="2" />
                 <circle cx="18" cy="6" r="2" />
@@ -304,12 +340,7 @@ export default function Home() {
               </svg>
               我要贡献
             </a>
-            <button
-              className="theme-toggle"
-              type="button"
-              onClick={() => setDark((value) => !value)}
-              aria-label={dark ? "切换到浅色模式" : "切换到深色模式"}
-            >
+            <button className="theme-toggle" type="button" onClick={() => setDark((value) => !value)} aria-label={dark ? "切换到浅色模式" : "切换到深色模式"}>
               <span>{dark ? "☀" : "☾"}</span>{dark ? "浅色" : "深色"}
             </button>
           </div>
@@ -328,18 +359,39 @@ export default function Home() {
             <fieldset>
               <legend>模型配置</legend>
               <div className="model-picker-grid">
-                <SelectField label="模型族" value={family} onChange={changeFamily} options={families.map((item) => ({ value: item, label: item }))} />
-                <SelectField label="模型" value={modelId} onChange={changeModel} options={familyModels.map((item) => ({ value: item.id, label: item.label }))} />
+                <SelectField
+                  label="厂商"
+                  value={vendorBrand}
+                  onChange={selectVendor}
+                  options={[{ value: "", label: "请按菜单栏开始选择" }, ...MODEL_INDEX.map((v) => ({ value: v.brand, label: `${v.brand}（${v.owner}）` }))]}
+                />
+                <SelectField
+                  label="模型"
+                  value={modelName}
+                  onChange={selectModel}
+                  options={modelOptions}
+                  disabled={!vendor}
+                />
+                <SelectField
+                  label="权重"
+                  value={weightKey}
+                  onChange={(value) => setWeightKey(value)}
+                  options={weightOptions}
+                  disabled={!vendor || !modelName}
+                />
               </div>
-              <p className="field-note">模型参数由内置配置自动参与计算。</p>
+              <p className="field-note">权重数据实时从 ModelScope 拉取。</p>
             </fieldset>
+
+            {loading && <p className="field-note">正在拉取 {weight?.owner}/{weight?.name} 的权重清单…</p>}
+            {error && <p className="field-note" style={{ color: "var(--rose)" }}>加载失败：{error}</p>}
 
             <fieldset>
               <legend>负载参数</legend>
               <NumberField label="Max batched tokens" value={inputs.maxBatchedTokens} onChange={(v) => update("maxBatchedTokens", v)} />
             </fieldset>
 
-            {model.kvCacheModelId && (
+            {kvCacheModelId && struct && (
               <fieldset>
                 <legend>KV Cache</legend>
                 <div className="field-grid">
@@ -350,7 +402,7 @@ export default function Home() {
                   <SelectField label="KV precision" value={inputs.kvPrecision ?? DEFAULTS.kvPrecision} onChange={(value) => setInputs((current) => ({ ...current, kvPrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                   <SelectField label="Index precision" value={inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision} onChange={(value) => setInputs((current) => ({ ...current, indexCachePrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                 </div>
-                <p className="field-note">标准 GQA，K/V 各存一份 Cache。</p>
+                <p className="field-note">基于上游 kv-cache-calculator 的 {kvCacheModelId} 结构参数。</p>
               </fieldset>
             )}
 
@@ -360,35 +412,30 @@ export default function Home() {
                 <NumberField label="DP size" value={inputs.dpSize} onChange={(v) => update("dpSize", v)} />
                 <NumberField label="TP size" value={inputs.tpSize} onChange={(v) => update("tpSize", v)} />
               </div>
-              {model.supportsMtp ? (
-                <div className="field-grid parallel-basic">
-                  <NumberField label="Shared Expert TP" value={inputs.sharedExpertTpSize} onChange={(v) => update("sharedExpertTpSize", v)} />
-                  <NumberField label="MTP layers" value={inputs.mtpLayers} onChange={(v) => update("mtpLayers", v)} />
-                </div>
-              ) : (
+              <div className="parallel-basic">
+                <NumberField label="Shared Expert TP" value={inputs.sharedExpertTpSize} onChange={(v) => update("sharedExpertTpSize", v)} />
+              </div>
+              {kvCacheModelId && (
                 <div className="parallel-basic">
-                  <NumberField label="Shared Expert TP" value={inputs.sharedExpertTpSize} onChange={(v) => update("sharedExpertTpSize", v)} />
+                  <NumberField label="MTP layers" value={inputs.mtpLayers} onChange={(v) => update("mtpLayers", v)} />
                 </div>
               )}
               <p className="field-note">Shared Expert TP 为 1 表示不切分，不影响 EP size。</p>
               <details className="advanced-tp">
                 <summary>
                   高级切分配置
-                  <span
-                    className="help-icon"
-                    role="note"
-                    aria-label="默认跟随主 TP size（与 vLLM 一致），输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。"
+                  <span className="help-icon" role="note" aria-label="默认跟随主 TP size（与 vLLM 一致），输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。"
                     onClick={(event) => event.preventDefault()}
                   >?<span className="help-tooltip">默认跟随主 TP size（与 vLLM 一致），输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。</span></span>
                 </summary>
                 <div className="advanced-tp-body">
                   <div className="field-grid">
                     <NumberField label="QK / Indexer TP" value={result.attentionTp} onChange={(v) => updateOptional("attentionTpSize", v)} />
-                    <NumberField label="O-proj TP" value={result.oprojTp} onChange={(v) => updateOptional("oprojTpSize", v)} />
+                    <NumberField label="O-proj TP" value={Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? inputs.tpSize, 1)))} onChange={(v) => updateOptional("oprojTpSize", v)} />
                   </div>
                   <div className="field-grid">
-                    <NumberField label="Embedding TP" value={result.embeddingTp} onChange={(v) => updateOptional("embeddingTpSize", v)} />
-                    <NumberField label="LM Head TP" value={result.lmHeadTp} onChange={(v) => updateOptional("lmHeadTpSize", v)} />
+                    <NumberField label="Embedding TP" value={Math.max(1, Math.floor(safe(inputs.embeddingTpSize ?? inputs.tpSize, 1)))} onChange={(v) => updateOptional("embeddingTpSize", v)} />
+                    <NumberField label="LM Head TP" value={Math.max(1, Math.floor(safe(inputs.lmHeadTpSize ?? inputs.tpSize, 1)))} onChange={(v) => updateOptional("lmHeadTpSize", v)} />
                   </div>
                 </div>
               </details>
@@ -410,21 +457,49 @@ export default function Home() {
               <div className="hero-copy">
                 <span className="eyebrow">ESTIMATED PER DEVICE</span>
                 <div className="total-line"><strong>{formatGiB(result.total).replace(" GiB", "")}</strong><span>GiB</span></div>
-                <p>{model.weightProfile ? "单卡总显存预估（含权重）" : "单卡非权重显存预估"}</p>
+                <p>{weightResult ? "单卡总显存预估（含权重）" : weight ? "加载权重数据后显示完整预估" : "请先选择厂商与权重"}</p>
               </div>
             </article>
 
             <article className="model-context-card">
               <div className="model-identity">
                 <span className="eyebrow">ACTIVE MODEL</span>
-                <strong>{model.label}</strong>
+                {weight ? (
+                  <a className="model-link" href={`https://modelscope.cn/models/${weight.owner}/${weight.name}`} target="_blank" rel="noreferrer">
+                    {weight.owner}/{weight.name}
+                  </a>
+                ) : (
+                  <strong className="model-link model-link-empty">尚未选择权重</strong>
+                )}
               </div>
-              <div className="model-fact"><span>Hidden size</span><strong>{model.hiddenSize.toLocaleString("zh-CN")}</strong></div>
-              <div className="model-fact"><span>专家总数</span><strong>{model.expertCount.toLocaleString("zh-CN")}</strong></div>
-              <div className="model-fact"><span>TopK 专家</span><strong>{model.topK.toLocaleString("zh-CN")}</strong></div>
-              <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
-              <div className="model-fact"><span>本地专家数</span><strong>{localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong><small>{model.expertCount} ÷ EP {epSize}</small></div>
-              {model.source && <a className="model-source" href={model.source} target="_blank" rel="noopener noreferrer" aria-label={`查看 ${model.label} 官方配置`}>官方配置 ↗</a>}
+              {struct ? (
+                <>
+                  <div className="model-facts">
+                    <div className="model-fact"><span>Hidden size</span><strong>{struct.hiddenSize.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>层数</span><strong>{struct.numLayers.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>专家总数</span><strong>{struct.expertCount.toLocaleString("zh-CN")}</strong><small>{struct.expertCount > 0 ? "MoE" : "Dense"}</small></div>
+                    <div className="model-fact"><span>TopK 专家</span><strong>{struct.topK.toLocaleString("zh-CN")}</strong></div>
+                    <div className="model-fact"><span>EP size</span><strong>{epSize.toLocaleString("zh-CN")}</strong><small>TP {inputs.tpSize} × DP {inputs.dpSize}</small></div>
+                    <div className="model-fact"><span>本地专家数</span><strong>{result.localExperts.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</strong></div>
+                  </div>
+                  {modelData?.optionalShards && modelData.optionalShards.length > 0 && (
+                    <p className="field-note">已并入可选权重：{modelData.optionalShards.join("、")}</p>
+                  )}
+                </>
+              ) : loading && progress ? (
+                progress.phase === "shards" ? (
+                  <div className="load-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
+                    <div className="load-progress-track">
+                      <div className="load-progress-fill" style={{ width: `${progress.total ? Math.round((progress.done / progress.total) * 100) : 0}%` }} />
+                    </div>
+                    <span>加载权重分片 {progress.done}/{progress.total}</span>
+                  </div>
+                ) : (
+                  <p className="field-note">正在加载权重索引…</p>
+                )
+              ) : (
+                <p className="field-note">{loading ? "加载中…" : "请选择权重"}</p>
+              )}
             </article>
 
             <div className="metric-grid">
@@ -444,11 +519,8 @@ export default function Home() {
               </div>
               <div className="stack" aria-label="显存构成比例图">
                 {categories.map((item) => (
-                  <div
-                    key={item.label}
-                    title={`${item.label}: ${formatGiB(item.value)}`}
-                    style={{ width: `${result.total ? item.value / result.total * 100 : 0}%`, background: item.color }}
-                  />
+                  <div key={item.label} title={`${item.label}: ${formatGiB(item.value)}`}
+                    style={{ width: `${result.total ? item.value / result.total * 100 : 0}%`, background: item.color }} />
                 ))}
               </div>
               <div className="legend">
@@ -456,37 +528,21 @@ export default function Home() {
               </div>
 
               <div className="detail-sections">
-                {model.weightProfile && (
+                {weightResult && (
                   <DetailSection title="权重占用" value={result.weight} tone="rose">
-                    {result.weightBreakdown ? (
-                      <>
-                        <div className="sub-detail weight-summary">
-                          <span>全量模型 {formatGiB(result.fullWeight)}</span>
-                          <span>当前单卡 {formatGiB(result.weight)}</span>
-                          <span>本地专家 {localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</span>
-                        </div>
-                        <DetailRow label={`Routed Experts ${(model.weightProfile.moeWeightFormat ?? "mxfp8").toUpperCase()} payload`} value={result.weightBreakdown.routedExpertPayload} formula={`${model.weightProfile.moeLayers} × (${model.expertCount} ÷ ${epSize}) × 3 × ${model.hiddenSize} × ${model.weightProfile.expertIntermediateSize} × ${(model.weightProfile.moeWeightFormat ?? "mxfp8") === "mxfp4" ? "0.5" : "1"} B`} />
-                        <DetailRow label={`Routed Experts ${(model.weightProfile.moeWeightFormat ?? "mxfp8").toUpperCase()} scale`} value={result.weightBreakdown.routedExpertScales} formula="随本地专家数 E ÷ EP 切分；每 [1, 32] block 1 B" />
-                        <DetailRow label={`Attention ${model.weightProfile.qkvProjection === "qk" ? "Q+K" : "QKV"}（TP ${result.attentionTp}）`} value={result.weightBreakdown.attentionQkv} formula={model.weightProfile.qkvProjection === "qk" ? `${model.weightProfile.totalLayers} 层 × [Q: ${model.weightProfile.attentionHeads} heads ÷ TP ${result.attentionTp}；K: ${model.weightProfile.kvHeads} head 复制] × head dim ${model.weightProfile.headDim}；MXFP8 + scale，无 V 投影` : `Q/K/V 按 Attention TP ${result.attentionTp} 切分`} />
-                        <DetailRow label={`Attention O-proj（TP ${result.oprojTp}）`} value={result.weightBreakdown.attentionOproj} formula={`${model.weightProfile.totalLayers} × ${model.hiddenSize} × (${model.weightProfile.attentionHeads} × ${model.weightProfile.valueHeadDim ?? model.weightProfile.headDim} ÷ TP ${result.oprojTp})；MXFP8 payload ${formatCompact(result.weightBreakdown.attentionOprojPayload)} + scale ${formatCompact(result.weightBreakdown.attentionOprojScales)}`} />
-                        <DetailRow label={`Attention Indexer Q/K（TP ${result.attentionTp}）`} value={result.weightBreakdown.attentionIndexer} formula={`${model.weightProfile.sparseAttentionLayers ?? model.weightProfile.moeLayers} 层 × [Q: ${model.weightProfile.indexerHeads} heads ÷ TP ${result.attentionTp}；K: 1 head 复制] × head dim ${model.weightProfile.indexerHeadDim}；MXFP8 + scale`} />
-                        <DetailRow label="Attention 辅助张量" value={result.weightBreakdown.attentionMetadata} formula="Q/K Norm、Indexer Q/K Norm 等" />
-                        <DetailRow label="Dense MLP FP8 payload" value={result.weightBreakdown.denseMlpPayload} formula={`${model.weightProfile.denseLayers} × 3 × H × (${model.weightProfile.denseIntermediateSize} ÷ ${inputs.tpSize})`} />
-                        <DetailRow label="Dense MLP MXFP8 scale" value={result.weightBreakdown.denseMlpScales} formula="按 TP 切分后的实际矩阵 shape 计算" />
-                        <DetailRow label={`Shared Experts ${(model.weightProfile.sharedExpertWeightFormat ?? model.weightProfile.moeWeightFormat ?? "mxfp8").toUpperCase()} payload（TP ${result.sharedExpertTp}）`} value={result.weightBreakdown.sharedExpertPayload} formula={`Lm × Ns × 3 × H × I × ${(model.weightProfile.sharedExpertWeightFormat ?? model.weightProfile.moeWeightFormat ?? "mxfp8") === "mxfp4" ? "0.5" : "1"} B${result.sharedExpertTp > 1 ? ` ÷ ${result.sharedExpertTp}` : "；不切分"}`} />
-                        <DetailRow label={`Shared Experts ${(model.weightProfile.sharedExpertWeightFormat ?? model.weightProfile.moeWeightFormat ?? "mxfp8").toUpperCase()} scale`} value={result.weightBreakdown.sharedExpertScales} formula={result.sharedExpertTp > 1 ? `按独立 TP ${result.sharedExpertTp} 切分后的矩阵 shape 计算` : "TP 1，不随 EP 切分，每个 Device 保留完整 scale"} />
-                        <DetailRow label="Router（FP32）" value={result.weightBreakdown.router} formula={`${model.weightProfile.moeLayers} × ${model.expertCount} × (${model.hiddenSize} + 1) × 4 B`} />
-                        <DetailRow label="Norm" value={result.weightBreakdown.norms} formula="BF16 Norm tensors" />
-                        <DetailRow label="Embedding" value={result.weightBreakdown.embedding} formula={`${result.weightBreakdown.paddedVocab} ÷ ${result.embeddingTp} × ${model.hiddenSize} × 2 B`} />
-                        <DetailRow label="LM Head" value={result.weightBreakdown.lmHead} formula={`${result.weightBreakdown.paddedVocab} ÷ ${result.lmHeadTp} × ${model.hiddenSize} × 2 B`} />
-                        {model.supportsMtp && (
-                          <DetailRow label={`MTP 权重（${inputs.mtpLayers} 层）`} value={result.weightBreakdown.mtpWeight} formula={`${inputs.mtpLayers} × 单层 ${formatCompact(result.weightBreakdown.mtpPerLayer)}；复制稀疏 MoE Block + MTP projection/norm，复用 Embedding/LM Head`} />
-                        )}
-                        <DetailRow label="Misc" value={result.weightBreakdown.misc} formula="RoPE inv_freq 等 buffer" />
-                      </>
-                    ) : (
-                      <p className="validation-note">当前并行组合不满足专家数、Attention Heads、中间维度或词表大小的整除要求。</p>
-                    )}
+                    <div className="sub-detail weight-summary">
+                      <span>全量模型 {formatGiB(result.fullWeight)}</span>
+                      <span>当前单卡 {formatGiB(result.weight)}</span>
+                      <span>{weight?.kind === "quantized" ? `Eco-Tech 量化 · ${weight.name}` : `原始权重 · ${weight?.name}`}</span>
+                    </div>
+                    {Object.entries(weightResult.breakdown).filter(([, b]) => b.tensors > 0).map(([module, b]) => (
+                      <DetailRow
+                        key={module}
+                        label={`${MODULE_LABEL[module as TensorModule]}（${b.tensors} 张量）`}
+                        value={b.perDevice}
+                        formula={`全量 ${formatCompact(b.full)}，逐张量 dtype × shape 求和`}
+                      />
+                    ))}
                   </DetailSection>
                 )}
 
@@ -495,26 +551,26 @@ export default function Home() {
                     <DetailRow
                       label={`K/V Cache（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
                       value={result.kvCacheBreakdown.kvCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveKvLayers} 层，K/V 各存一份，随 TP 切分`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers} + MTP ${inputs.mtpLayers} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B`}
                     />
                     <DetailRow
                       label={`Index Cache（${CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}
                       value={result.kvCacheBreakdown.indexCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.sparseLayers}${model.supportsMtp ? ` + MTP ${inputs.mtpLayers}` : ""} × ${result.kvCacheInfo.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B；有效 ${result.kvCacheBreakdown.effectiveIndexLayers} 层，Index K 随 TP 复制，不切分`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.sparseLayers} × ${result.kvCacheInfo.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B`}
                     />
                   </DetailSection>
                 )}
 
                 <DetailSection title="激活占用" value={result.activation} tone="coral">
-                  <DetailRow label="Hidden states + residual" value={result.hiddenResidual} formula={`2 × 2 B × ${inputs.maxBatchedTokens} × ${model.hiddenSize}`} />
-                  <DetailRow label="4 份 MoE 激活 buffer" value={result.moeBuffers} formula={`4 × 2 B × ${inputs.dpSize} × ${inputs.maxBatchedTokens} × ${model.topK} ÷ ${epSize} × ${model.hiddenSize}`} />
+                  <DetailRow label="Hidden states + residual" value={result.hiddenResidual} formula={`2 × 2 B × ${inputs.maxBatchedTokens} × ${struct?.hiddenSize ?? 0}`} />
+                  <DetailRow label="4 份 MoE 激活 buffer" value={result.moeBuffers} formula={`4 × 2 B × ${inputs.dpSize} × ${inputs.maxBatchedTokens} × ${struct?.topK ?? 0} ÷ ${epSize} × ${struct?.hiddenSize ?? 0}`} />
                 </DetailSection>
 
                 <DetailSection title="HCCL buffer" value={result.hccl} tone="blue">
                   <DetailRow label="DP buffer" value={result.hcclDP} formula={`max(ceil((${inputs.dpSize} + 1) × 4 ÷ 1024²), 50) × 2 MB`} />
                   <DetailRow label="TP buffer" value={result.hcclTP} formula="200 MB × 2" />
                   <DetailRow label="EP buffer" value={result.hcclEP} formula="200 MB × 2" />
-                  <DetailRow label={`MC2 buffer（本地专家 ${localExpertNum.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}）`} value={result.hcclMC2} formula={`2 × (${model.expertCount} ÷ ${epSize} × Max BS × EP × 480Align512 + K × Max BS × Align512)`} />
+                  <DetailRow label={`MC2 buffer（本地专家 ${result.localExperts.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}）`} value={result.hcclMC2} formula={`2 × (本地专家 × Max BS × EP × 480Align512 + K × Max BS × Align512)`} />
                   <div className="sub-detail">
                     <span>Dispatch {formatMiB(result.epDispatch)}</span>
                     <span>Combine {formatMiB(result.epCombine)}</span>
@@ -526,12 +582,12 @@ export default function Home() {
                 <DetailSection title="其他运行时" value={result.graph + result.cann + result.deviceOS} tone="violet">
                   <DetailRow label={`ACLGraph 占用（${inputs.graphCount} 张）`} value={result.graph} formula={`${inputs.graphCount} ÷ 5 × 0.27 GB`} />
                   <DetailRow label="CANN + PTA + 算子" value={result.cann} formula={`${inputs.cannGB} GiB 预估值`} />
-                  <DetailRow label="Device OS 固定占用" value={result.deviceOS} formula="4.25 × 1024³ bytes = 4.25 GiB" />
+                  <DetailRow label="Device OS 固定占用" value={result.deviceOS} formula="4.25 × 1024³ bytes（固定值）" />
                 </DetailSection>
               </div>
             </article>
 
-            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。MiniMax M3 权重包含 MXFP8 scale；EP 自动等于 TP × DP。KV Cache 与 Index Cache 按缓存 token 总数估算，不包含分配器开销。</p>
+            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。权重从 safetensors header 逐张量（dtype × shape）求和，全量精确；单卡按模块通用切分（专家÷EP、注意力/Embedding/LM Head÷TP、其余复制）为近似。KV Cache 仅对上游已收录的模型展示。EP 自动等于 TP × DP。</p>
           </section>
         </section>
       </div>
@@ -548,11 +604,11 @@ function NumberField({ label, value, onChange, step = "1" }: { label: string; va
   );
 }
 
-function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[] }) {
+function SelectField({ label, value, onChange, options, disabled = false }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[]; disabled?: boolean }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <select value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>
     </label>

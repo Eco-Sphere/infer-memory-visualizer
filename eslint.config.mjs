@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // 构建产物（GitHub Pages 静态输出，不应被 ESLint 扫描）：
+    "dist/**",
+    "pages-dist/**",
   ]),
 ]);
 
