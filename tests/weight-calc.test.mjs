@@ -34,7 +34,6 @@ test("calculateWeightFromTensors 全量精确求和且单卡按模块切分", ()
   const p = {
     tp: 4,
     ep: 8,
-    attentionTp: 4,
     oprojTp: 2,
     embeddingTp: 4,
     lmHeadTp: 4,
@@ -46,7 +45,7 @@ test("calculateWeightFromTensors 全量精确求和且单卡按模块切分", ()
   // 全量 = 12800+4096+4096+8192+8192+256 = 37632
   assert.equal(r.fullWeight, 37632);
 
-  // 单卡：embed/4 + q(attentionTp)/4 + o(oprojTp)/2 + mlp/tp4 + expert/ep8 + norm/1
+  // 单卡：embed/4 + q/tp4 + o(oprojTp)/2 + mlp/tp4 + expert/ep8 + norm/1
   assert.equal(r.breakdown.embedding.perDevice, 3200);
   assert.equal(r.breakdown.attention.perDevice, 1024 + 2048);
   assert.equal(r.breakdown.dense_mlp.perDevice, 2048);
@@ -60,8 +59,18 @@ test("TP=EP=1 时单卡权重等于全量权重", () => {
     { name: "model.embed_tokens.weight", dtype: "BF16", shape: [100, 64], bytes: 12800 },
     { name: "model.layers.0.mlp.experts.0.w1.weight", dtype: "I8", shape: [128, 64], bytes: 8192 },
   ];
-  const p = { tp: 1, ep: 1, attentionTp: 1, oprojTp: 1, embeddingTp: 1, lmHeadTp: 1, sharedExpertTp: 1 };
+  const p = { tp: 1, ep: 1, oprojTp: 1, embeddingTp: 1, lmHeadTp: 1, sharedExpertTp: 1 };
   const r = calculateWeightFromTensors(tensors, p);
   assert.equal(r.perDeviceWeight, r.fullWeight);
   assert.equal(r.fullWeight, 12800 + 8192);
+});
+
+test("DeepSeek MLA A 投影保持复制，不按 TP 切分", () => {
+  const tensors = [
+    { name: "model.layers.0.self_attn.q_a_proj.weight", dtype: "BF16", shape: [16, 64], bytes: 2048 },
+    { name: "model.layers.0.self_attn.kv_a_proj_with_mqa.weight", dtype: "BF16", shape: [16, 64], bytes: 2048 },
+    { name: "model.layers.0.self_attn.q_b_proj.weight", dtype: "BF16", shape: [64, 16], bytes: 2048 },
+  ];
+  const r = calculateWeightFromTensors(tensors, { tp: 4, ep: 4, oprojTp: 4, embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 1 });
+  assert.equal(r.breakdown.attention.perDevice, 2048 + 2048 + 2048 / 4);
 });

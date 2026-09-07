@@ -10,7 +10,6 @@ type Inputs = {
   maxBatchedTokens: number;
   dpSize: number;
   tpSize: number;
-  attentionTpSize: number | null;
   oprojTpSize: number | null;
   embeddingTpSize: number | null;
   lmHeadTpSize: number | null;
@@ -29,7 +28,6 @@ const DEFAULTS: Inputs = {
   maxBatchedTokens: 4096,
   dpSize: 8,
   tpSize: 4,
-  attentionTpSize: null,
   oprojTpSize: null,
   embeddingTpSize: null,
   lmHeadTpSize: null,
@@ -200,13 +198,12 @@ export default function Home() {
     return calculateWeightFromTensors(modelData.tensors, {
       tp,
       ep: tp * Math.max(1, Math.floor(safe(inputs.dpSize, 1))),
-      attentionTp: Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1))),
       oprojTp: Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? tp, 1))),
       embeddingTp: Math.max(1, Math.floor(safe(inputs.embeddingTpSize ?? tp, 1))),
       lmHeadTp: Math.max(1, Math.floor(safe(inputs.lmHeadTpSize ?? tp, 1))),
       sharedExpertTp: Math.max(1, Math.floor(safe(inputs.sharedExpertTpSize, 1))),
     });
-  }, [modelData, inputs.tpSize, inputs.dpSize, inputs.attentionTpSize, inputs.oprojTpSize, inputs.embeddingTpSize, inputs.lmHeadTpSize, inputs.sharedExpertTpSize]);
+  }, [modelData, inputs.tpSize, inputs.dpSize, inputs.oprojTpSize, inputs.embeddingTpSize, inputs.lmHeadTpSize, inputs.sharedExpertTpSize]);
 
   const kvCacheModelId = weight ? kvCacheModelIdOf(weight.rawName) : undefined;
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
@@ -242,7 +239,6 @@ export default function Home() {
     const deviceOS = 4.25 * GIB;
 
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
-    const attentionTp = Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1)));
     const kvCacheInfo = kvCacheModelId ? getKvCacheModelInfo(kvCacheModelId) : undefined;
     const kvCacheBreakdown = kvCacheModelId ? calculateKvCache({
       modelId: kvCacheModelId,
@@ -251,7 +247,7 @@ export default function Home() {
       kvPrecision: inputs.kvPrecision ?? DEFAULTS.kvPrecision,
       indexPrecision: inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision,
       mtpLayers: Math.floor(safe(inputs.mtpLayers)),
-      tpSize: attentionTp,
+      tpSize: tp,
     }) ?? null : null;
     const kvCache = kvCacheBreakdown?.total ?? 0;
 
@@ -272,7 +268,7 @@ export default function Home() {
       epCombine: active * 2 * epCombine,
       alignedDispatch: active * alignedDispatch,
       alignedCombine: active * alignedCombine,
-      attentionTp, graph: active * graph, cann: active * cann, deviceOS: active * deviceOS,
+      graph: active * graph, cann: active * cann, deviceOS: active * deviceOS,
       weight: active * weight, fullWeight: active * fullWeight, kvCache: active * kvCache,
       kvCacheBreakdown, kvCacheInfo, weightResult,
       total: active * total, localExperts,
@@ -422,15 +418,14 @@ export default function Home() {
               )}
               <p className="field-note">Shared Expert TP 为 1 表示不切分，不影响 EP size。</p>
               <details className="advanced-tp">
-                <summary>
+                  <summary>
                   高级切分配置
-                  <span className="help-icon" role="note" aria-label="默认跟随主 TP size（与 vLLM 一致），输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。"
+                  <span className="help-icon" role="note" aria-label="默认跟随主 TP size，输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。"
                     onClick={(event) => event.preventDefault()}
-                  >?<span className="help-tooltip">默认跟随主 TP size（与 vLLM 一致），输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。</span></span>
+                  >?<span className="help-tooltip">默认跟随主 TP size，输入数值后单独切分，清空输入框恢复跟随；各项均不影响 EP size。</span></span>
                 </summary>
                 <div className="advanced-tp-body">
                   <div className="field-grid">
-                    <NumberField label="QK / Indexer TP" value={result.attentionTp} onChange={(v) => updateOptional("attentionTpSize", v)} />
                     <NumberField label="O-proj TP" value={Math.max(1, Math.floor(safe(inputs.oprojTpSize ?? inputs.tpSize, 1)))} onChange={(v) => updateOptional("oprojTpSize", v)} />
                   </div>
                   <div className="field-grid">
@@ -535,6 +530,7 @@ export default function Home() {
                       <span>当前单卡 {formatGiB(result.weight)}</span>
                       <span>{weight?.kind === "quantized" ? `Eco-Tech 量化 · ${weight.name}` : `原始权重 · ${weight?.name}`}</span>
                     </div>
+                    {struct?.hasMla && <p className="field-note">MLA 的 A 投影（Q-A、KV-A）按复制权重估算，不参与 TP 切分。</p>}
                     {Object.entries(weightResult.breakdown).filter(([, b]) => b.tensors > 0).map(([module, b]) => (
                       <DetailRow
                         key={module}
@@ -551,7 +547,7 @@ export default function Home() {
                     <DetailRow
                       label={`K/V Cache（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
                       value={result.kvCacheBreakdown.kvCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers} + MTP ${inputs.mtpLayers} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B`}
+                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers} + MTP ${inputs.mtpLayers} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${inputs.tpSize}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B`}
                     />
                     <DetailRow
                       label={`Index Cache（${CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}

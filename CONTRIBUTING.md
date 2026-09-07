@@ -89,7 +89,7 @@ git switch -c feat/简短描述
 
 权重显存从 safetensors header 逐张量计算：`numel × dtypeBytes(dtype)` 求和得到全量权重（精确）。单卡权重由 `app/weight-calc.ts` 的 `classifyTensor` 将张量归类为模块，再按通用规则切分：
 
-- 路由专家 `÷ EP`；注意力 QKV `÷ attentionTp`、O-Proj `÷ oprojTp`；Dense MLP `÷ TP`；Embedding / LM Head `÷ embeddingTp / lmHeadTp`；Shared Expert、Router、Norm、视觉塔等复制。
+- 路由专家 `÷ EP`；注意力 QKV `÷ TP`、O-Proj `÷ oprojTp`；DeepSeek MLA 的 A 投影复制、不切分；Dense MLP `÷ TP`；Embedding / LM Head `÷ embeddingTp / lmHeadTp`；Shared Expert、Router、Norm、视觉塔等复制。
 
 量化 metadata（scale / offset / quant_bias）是独立张量，随主权重张量归类并计入。若新架构的张量命名无法被现有关键词正确归类，请在 `classifyTensor` 中补充关键词或新增模块并加测试；不要用「总参数量 × dtype ÷ 设备数」的均值近似。
 

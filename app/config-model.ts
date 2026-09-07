@@ -18,6 +18,7 @@ export type ModelStructure = {
   architectures: string[];
   modelType: string;
   hasVision: boolean;
+  hasMla: boolean;
 };
 
 function flatten(
@@ -71,6 +72,10 @@ export function extractModelStructure(config: Record<string, unknown>): ModelStr
     return Array.isArray(v) ? (v as string[]) : [];
   })();
   const modelType = String(flat["model_type"] ?? config.model_type ?? "");
+  const hasMla =
+    (num(flat, ["q_lora_rank"]) > 0 && num(flat, ["kv_lora_rank"]) > 0) ||
+    /deepseek_v[234]/i.test(modelType) ||
+    architectures.some((name) => /deepseekv[234]/i.test(name));
 
   const hiddenSize = langNum(flat, ["hidden_size"]);
   const numLayers = langNum(flat, ["num_hidden_layers"], ["num_layers", "n_layer"]);
@@ -126,5 +131,6 @@ export function extractModelStructure(config: Record<string, unknown>): ModelStr
     architectures,
     modelType,
     hasVision,
+    hasMla,
   };
 }
