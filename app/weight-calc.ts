@@ -3,7 +3,7 @@
 //
 // 全量权重（TP=EP=1）为 numel × dtype 字节数之和，与模块分类无关，绝对精确；
 // 单卡权重按张量所属模块应用通用切分规则（expert 按 EP、embedding/LM Head 按 TP、
-// attention 的 QKV 按 attentionTp、O-Proj 按 oprojTp、dense 按 TP、其余复制），
+// attention 的 QKV 按 TP、O-Proj 按 oprojTp、dense 按 TP、其余复制），
 // 面向不同架构为通用近似，后续可逐架构细化。
 
 import type { SafetensorInfo } from "./safetensors";
@@ -25,7 +25,6 @@ export type TensorModule =
 export type WeightParallel = {
   tp: number;
   ep: number;
-  attentionTp: number;
   oprojTp: number;
   embeddingTp: number;
   lmHeadTp: number;
@@ -87,6 +86,11 @@ function isOproj(name: string): boolean {
   return includes(name, OPROJ);
 }
 
+/** DeepSeek MLA 的 A 投影在 vLLM 中使用 ReplicatedLinear/disable_tp=True。 */
+function isMlaAProjection(name: string): boolean {
+  return includes(name, ["q_a_proj", "kv_a_proj_with_mqa", "fused_qkv_a_proj"]);
+}
+
 function newBreakdown(): Record<TensorModule, ModuleBreakdown> {
   const empty: ModuleBreakdown = { full: 0, perDevice: 0, tensors: 0 };
   return {
@@ -110,7 +114,6 @@ export function calculateWeightFromTensors(
   const safe = (v: number, dflt: number) => (Number.isFinite(v) && v > 0 ? v : dflt);
   const tp = safe(p.tp, 1);
   const ep = safe(p.ep, 1);
-  const attentionTp = safe(p.attentionTp, tp);
   const oprojTp = safe(p.oprojTp, tp);
   const embeddingTp = safe(p.embeddingTp, tp);
   const lmHeadTp = safe(p.lmHeadTp, tp);
@@ -123,7 +126,8 @@ export function calculateWeightFromTensors(
       case "shared_expert":
         return sharedExpertTp;
       case "attention":
-        return isOproj(name) ? oprojTp : attentionTp;
+        if (isMlaAProjection(name)) return 1;
+        return isOproj(name) ? oprojTp : tp;
       case "dense_mlp":
         return tp;
       case "embedding":

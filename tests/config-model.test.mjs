@@ -36,6 +36,7 @@ test("MiniMax 风格嵌套 text_config 提取", () => {
   assert.equal(s.intermediateSize, 28672);
   assert.equal(s.moeIntermediateSize, 1024);
   assert.equal(s.hasVision, true);
+  assert.equal(s.hasMla, false);
   assert.deepEqual(s.architectures, ["MiniMaxM3VLForCausalLM"]);
 });
 
@@ -60,6 +61,7 @@ test("DeepSeek 风格平铺字段提取（num_experts 别名）", () => {
   assert.equal(s.expertCount, 256);
   assert.equal(s.topK, 8);
   assert.equal(s.hasVision, false);
+  assert.equal(s.hasMla, true);
 });
 
 test("dense 模型无 expert 字段时 expertCount=0", () => {
@@ -74,4 +76,5 @@ test("dense 模型无 expert 字段时 expertCount=0", () => {
   const s = extractModelStructure(cfg);
   assert.equal(s.expertCount, 0);
   assert.equal(s.topK, 0);
+  assert.equal(s.hasMla, false);
 });

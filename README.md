@@ -55,7 +55,7 @@
 **单卡权重**按张量所属模块应用通用切分规则（近似，后续可逐架构细化）：
 
 - 路由专家 `÷ EP`；
-- 注意力 QKV `÷ attentionTp`，O-Proj `÷ oprojTp`；
+- 注意力 QKV `÷ TP`，O-Proj `÷ oprojTp`；DeepSeek MLA 的 A 投影（Q-A、KV-A）复制、不切分；
 - Dense MLP `÷ TP`，Embedding / LM Head `÷ embeddingTp / lmHeadTp`；
 - Shared Expert、Router、Norm、视觉塔等复制（`÷ 1`）。
 
