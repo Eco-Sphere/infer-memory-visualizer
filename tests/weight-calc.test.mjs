@@ -196,3 +196,50 @@ test("Ling/Ring attention.dense 及其量化 scale 使用 O-Proj TP", () => {
   assert.deepEqual(r.breakdown.attention.groups.map(g => g.parallelism), ["O-Proj TP", "O-Proj TP", "Attention TP"]);
   assert.equal(classifyTensor("model.layers.0.mlp.dense.weight"), "dense_mlp");
 });
+
+test("Step-5 replicates MQA indexer weights and KV/provider groups when TP exceeds four", () => {
+  const names = ["k_proj.weight", "v_proj.weight", "sparse_indexer_q.weight", "sparse_indexer_w.weight",
+    "sparse_indexer_k.weight", "sparse_indexer_z.weight", "ssmax_s", "q_proj.weight", "o_proj.weight"];
+  const tensors = names.map(name => ({ name: `model.layers.3.self_attn.${name}`, dtype: "BF16", shape: [64], bytes: 128 }));
+  const r = calculateWeightFromTensors(tensors, {
+    step5: true, tp: 8, ep: 32, attentionTp: 8, oprojTp: 2, embeddingTp: 8, lmHeadTp: 8, sharedExpertTp: 8,
+  });
+  assert.deepEqual(r.breakdown.attention.groups.map(g => g.divisor), [4, 4, 4, 4, 1, 1, 1, 8, 2]);
+  assert.equal(r.breakdown.attention.perDevice, 4 * 128 / 4 + 3 * 128 + 128 / 8 + 128 / 2);
+  assert.equal(classifyTensor("model.layers.3.moe.gate_proj.weight_scale_inv"), "routed_expert");
+  assert.equal(classifyTensor("model.layers.3.share_expert.gate_proj.weight"), "shared_expert");
+});
+
+test("MTP layers 筛选追加投机层，权重、模块明细和公式同步变化", () => {
+  const tensors = [
+    { name: "model.layers.92.self_attn.q_proj.weight", dtype: "BF16", shape: [64, 64], bytes: 8192 },
+    { name: "model.layers.91.moe.gate_proj.weight", dtype: "I8", shape: [128, 64], bytes: 8192 },
+    { name: "model.layers.94.self_attn.q_proj.weight", dtype: "BF16", shape: [64, 64], bytes: 8192 },
+    { name: "vision_model.encoder.layers.100.attn.weight", dtype: "BF16", shape: [64], bytes: 128 },
+    { name: "model.layers.93.self_attn.q_proj.weight", dtype: "BF16", shape: [64, 64], bytes: 8192 },
+  ];
+  const p = { tp: 4, ep: 32, attentionTp: 4, oprojTp: 4, embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 4 };
+  const results = [0, 1, 2, 3].map(layers => calculateWeightFromTensors(tensors, { ...p, mtp: { layers, mainLayers: 92 } }));
+  for (let i = 0; i < results.length; i++) {
+    assert.equal(results[i].fullWeight, 8192 + 128 + i * 8192);
+    assert.equal(results[i].perDeviceWeight, 8192 / 32 + 128 + i * 8192 / 4);
+    assert.equal(results[i].breakdown.attention.tensors, i);
+    assert.equal(results[i].breakdown.vision.tensors, 1);
+    if (i) assert.equal(results[i].breakdown.attention.groups[0].count, i);
+  }
+  assert.equal(calculateWeightFromTensors(tensors, p).fullWeight, results[3].fullWeight);
+});
+
+test("独立 MTP 路径按实际层编号启用，共用投影只计一次", () => {
+  for (const prefix of ["mtp", "mtp.layers", "model.mtp_layers", "model.nextn_predict_layers"]) {
+    const tensor = name => ({ name, dtype: "BF16", shape: [64], bytes: 128 });
+    const tensors = [tensor(`${prefix}.2.self_attn.q_proj.weight`), tensor("model.norm.weight"),
+      tensor(`${prefix}.1.self_attn.q_proj.weight`), tensor("mtp.fc.weight")];
+    const p = { tp: 1, ep: 1, attentionTp: 1, oprojTp: 1, embeddingTp: 1, lmHeadTp: 1, sharedExpertTp: 1 };
+    const calc = layers => calculateWeightFromTensors(tensors, { ...p, mtp: { layers, mainLayers: 92 } });
+    assert.equal(calc(0).fullWeight, 128, prefix);
+    assert.equal(calc(1).fullWeight, 384, prefix);
+    assert.equal(calc(2).fullWeight, 512, prefix);
+    assert.equal(calc(5).fullWeight, 512, prefix);
+  }
+});

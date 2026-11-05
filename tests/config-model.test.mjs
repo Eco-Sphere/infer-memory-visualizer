@@ -178,3 +178,17 @@ test("Step-3.5 的顶层 TopK 与 Kimi-K3 的嵌套共享专家别名", () => {
   assert.equal(kimi.topK, 16);
   assert.equal(kimi.sharedExperts, 2);
 });
+
+test("Step-5-Preview 官方配置读取 352 专家与 4 组 GQA", () => {
+  const s = extractModelStructure({ model_type: "step5_vl", vision_config: { model_type: "perception_encoder" },
+    text_config: { hidden_size: 4096, num_hidden_layers: 92, num_attention_heads: 64,
+      num_attention_groups: 4, head_dim: 192, vocab_size: 128896,
+      moe_num_experts: 352, moe_top_k: 8, num_experts_per_tok: 8, moe_intermediate_size: 1536 } });
+  assert.equal(s.expertCount, 352);
+  assert.equal(s.expertCount / 32, 11);
+  assert.equal(s.topK, 8);
+  assert.equal(s.kvHeads, 4);
+  assert.equal(s.headDim, 192);
+  assert.equal(s.numLayers, 92);
+  assert.equal(s.hasVision, true);
+});

@@ -70,3 +70,9 @@ test("量化权重统一 owner 为 Eco-Tech", () => {
   assert.ok(allQuant.length > 0);
   assert.equal(QUANT_OWNER, "Eco-Tech");
 });
+test("Step-5-Preview registers official and Eco-Tech weights with the local cache adapter", () => {
+  const step = MODEL_INDEX.find(v => v.brand === "Step");
+  assert.equal(step.owner, "stepfun-ai");
+  assert.deepEqual(step.models.find(m => m.name === "Step-5-Preview"), { name: "Step-5-Preview", quantized: ["Step-5-Preview-w8a8-mxfp8"] });
+  assert.equal(kvCacheModelIdOf("Step-5-Preview"), "step5-preview");
+});

@@ -23,6 +23,10 @@ export type TensorModule =
   | "other";
 
 export type WeightParallel = {
+  /** 未传时计算完整 checkpoint；界面按启用的 MTP 层筛选权重。 */
+  mtp?: { layers: number; mainLayers: number };
+  /** Step-5 GQA 与 DSA provider group 的复制/切分布局。 */
+  step5?: boolean;
   tp: number;
   ep: number;
   attentionTp: number;
@@ -133,6 +137,39 @@ function newBreakdown(): Record<TensorModule, ModuleBreakdown> {
   };
 }
 
+/** 识别追加在主干后的层、独立 MTP 模块，以及各 MTP 层共用的投影。 */
+function mtpTensorGroup(name: string, mainLayers: number): { family: string; index: number } | "shared" | null {
+  if (includes(name, VISION)) return null;
+  const named = name.match(/(?:^|\.)(mtp|mtp_layers|nextn_predict_layers)(?:\.layers)?\.(\d+)(?:\.|$)/i);
+  if (named) return { family: named[1].toLowerCase(), index: Number(named[2]) };
+  if (/(?:^|\.)(mtp|mtp_layers|nextn_predict_layers)(?:\.|$)/i.test(name)) return "shared";
+  const layer = name.match(/(?:^|\.)layers\.(\d+)(?:\.|$)/i);
+  if (mainLayers > 0 && layer && Number(layer[1]) >= mainLayers) {
+    return { family: "appended", index: Number(layer[1]) };
+  }
+  return null;
+}
+
+function selectMtpTensors(tensors: WeightTensor[], selection: NonNullable<WeightParallel["mtp"]>): WeightTensor[] {
+  const enabled = Number.isFinite(selection.layers) ? Math.max(0, Math.floor(selection.layers)) : 0;
+  const entries = tensors.map((tensor) => ({ tensor, group: mtpTensorGroup(tensor.name, selection.mainLayers) }));
+  const families = new Map<string, number[]>();
+  for (const { group } of entries) {
+    if (!group || group === "shared") continue;
+    if (!families.has(group.family)) families.set(group.family, []);
+    families.get(group.family)!.push(group.index);
+  }
+  // 按实际存在的层编号排序，兼容从 0 或 1 开始的独立 MTP 层。
+  const ranks = new Map([...families].map(([family, indices]) => [
+    family, new Map([...new Set(indices)].sort((a, b) => a - b).map((index, rank) => [index, rank])),
+  ]));
+  return entries.filter(({ group }) => {
+    if (!group) return true;
+    if (group === "shared") return enabled > 0;
+    return ranks.get(group.family)!.get(group.index)! < enabled;
+  }).map(({ tensor }) => tensor);
+}
+
 export function calculateWeightFromTensors(
   tensors: WeightTensor[],
   p: WeightParallel,
@@ -153,6 +190,10 @@ export function calculateWeightFromTensors(
       case "shared_expert":
         return sharedExpertTp;
       case "attention":
+        if (p.step5) {
+          if (/\.sparse_indexer_(k|z)\.|\.ssmax_s$/i.test(name)) return 1;
+          if (/\.(k_proj|v_proj|sparse_indexer_q|sparse_indexer_w)\./i.test(name)) return Math.min(attentionTp, 4);
+        }
         return isOproj(name) ? oprojTp : attentionTp;
       case "dense_mlp":
         return tp;
@@ -169,7 +210,12 @@ export function calculateWeightFromTensors(
     switch (module) {
       case "routed_expert": return "EP";
       case "shared_expert": return "Shared Expert TP";
-      case "attention": return isOproj(name) ? "O-Proj TP" : "Attention TP";
+      case "attention":
+        if (p.step5) {
+          if (/\.sparse_indexer_(k|z)\.|\.ssmax_s$/i.test(name)) return "复制";
+          if (/\.(k_proj|v_proj|sparse_indexer_q|sparse_indexer_w)\./i.test(name)) return "KV/Provider TP（最多 4）";
+        }
+        return isOproj(name) ? "O-Proj TP" : "Attention TP";
       case "dense_mlp": return "TP";
       case "embedding": return "Embedding TP";
       case "lm_head": return "LM Head TP";
@@ -181,7 +227,7 @@ export function calculateWeightFromTensors(
   const groups = new Map<string, WeightFormulaGroup>();
   let fullWeight = 0;
 
-  for (const t of tensors) {
+  for (const t of p.mtp ? selectMtpTensors(tensors, p.mtp) : tensors) {
     const tensorModule = classifyTensor(t.name);
     const bytes = t.bytes || 0;
     fullWeight += bytes;

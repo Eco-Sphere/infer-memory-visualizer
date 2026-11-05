@@ -138,6 +138,7 @@ export const MODEL_INDEX: Vendor[] = [
     models: [
       { name: "Step-3.5-Flash", quantized: ["Step-3.5-Flash-w8a8-mtp"] },
       { name: "Step-3.7-Flash", quantized: ["Step-3.7-Flash-w8a8-mtp"] },
+      { name: "Step-5-Preview", quantized: ["Step-5-Preview-w8a8-mxfp8"] },
     ],
   },
 ];
@@ -145,9 +146,10 @@ export const MODEL_INDEX: Vendor[] = [
 /**
  * 原始权重名 → kv-cache-calculator 的 model id 映射。
  * 仅覆盖上游 52 个模型里能精确对应（或日期版本可近似）的条目；
- * 未列出的原始权重无 KV Cache 公式，前端相应隐藏 KV Cache 部分。
+ * Step-5-Preview 使用本地缓存适配；未列出的原始权重无 KV Cache 公式，前端相应隐藏 KV Cache 部分。
  */
 export const KV_MODEL_ID: Record<string, string> = {
+  "Step-5-Preview": "step5-preview", // 本地适配官方滑窗 + DSA 缓存
   "MiniMax-M3": "minimax-m3",
   "MiniMax-M2.7": "minimax-m2.7",
   "MiniMax-M2.5": "minimax-m2.5",

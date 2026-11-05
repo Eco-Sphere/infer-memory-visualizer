@@ -65,10 +65,10 @@ const MODULE_LABEL: Record<TensorModule, string> = {
   other: "其他",
 };
 
-function formatGiB(bytes: number) {
+function formatGiB(bytes: number, precision = 2) {
   return `${(bytes / GIB).toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: precision,
+    maximumFractionDigits: precision,
   })} GiB`;
 }
 
@@ -78,8 +78,8 @@ function formatMiB(bytes: number) {
   })} MiB`;
 }
 
-function formatCompact(bytes: number) {
-  return bytes >= GIB ? formatGiB(bytes) : formatMiB(bytes);
+function formatCompact(bytes: number, precision = 2) {
+  return bytes >= GIB ? formatGiB(bytes, precision) : formatMiB(bytes);
 }
 
 function safe(value: number, fallback = 0) {
@@ -167,6 +167,9 @@ export default function Home() {
     setLoading(true);
     setError(undefined);
     setProgress(null);
+    if (weight.rawName === "Step-5-Preview") {
+      setInputs((current) => ({ ...current, sharedExpertTpSize: Math.max(1, current.tpSize) }));
+    }
     /* eslint-enable react-hooks/set-state-in-effect */
     (async () => {
       try {
@@ -198,6 +201,8 @@ export default function Home() {
     if (!modelData) return null;
     const tp = Math.max(1, Math.floor(safe(inputs.tpSize, 1)));
     return calculateWeightFromTensors(modelData.tensors, {
+      step5: modelData.struct.modelType === "step5_vl",
+      mtp: { layers: Math.floor(safe(inputs.mtpLayers)), mainLayers: modelData.struct.numLayers },
       tp,
       ep: tp * Math.max(1, Math.floor(safe(inputs.dpSize, 1))),
       attentionTp: Math.max(1, Math.floor(safe(inputs.attentionTpSize ?? tp, 1))),
@@ -206,9 +211,10 @@ export default function Home() {
       lmHeadTp: Math.max(1, Math.floor(safe(inputs.lmHeadTpSize ?? tp, 1))),
       sharedExpertTp: Math.max(1, Math.floor(safe(inputs.sharedExpertTpSize, 1))),
     });
-  }, [modelData, inputs.tpSize, inputs.dpSize, inputs.attentionTpSize, inputs.oprojTpSize, inputs.embeddingTpSize, inputs.lmHeadTpSize, inputs.sharedExpertTpSize]);
+  }, [modelData, inputs.tpSize, inputs.dpSize, inputs.attentionTpSize, inputs.oprojTpSize, inputs.embeddingTpSize, inputs.lmHeadTpSize, inputs.sharedExpertTpSize, inputs.mtpLayers]);
 
   const kvCacheModelId = weight ? kvCacheModelIdOf(weight.rawName) : undefined;
+  const isStep5 = kvCacheModelId === "step5-preview";
   const epSize = Math.max(1, Math.floor(safe(inputs.tpSize, 1)) * Math.floor(safe(inputs.dpSize, 1)));
 
   const result = useMemo(() => {
@@ -294,7 +300,7 @@ export default function Home() {
 
   const categories = [
     ...(weightResult ? [{ label: "权重占用", value: result.weight, color: "var(--rose)", display: formatGiB(result.weight) }] : []),
-    ...(kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache) }] : []),
+    ...(kvCacheModelId ? [{ label: "KV + Index Cache", value: result.kvCache, color: "var(--cyan)", display: formatGiB(result.kvCache, 3) }] : []),
     { label: "激活占用", value: result.activation, color: "var(--coral)", display: formatGiB(result.activation) },
     { label: "HCCL buffer", value: result.hccl, color: "var(--blue)", display: formatGiB(result.hccl) },
     { label: "ACLGraph 占用", value: result.graph, color: "var(--violet)", display: formatGiB(result.graph) },
@@ -400,9 +406,9 @@ export default function Home() {
                 </div>
                 <div className="field-grid cache-precision-fields">
                   <SelectField label="KV precision" value={inputs.kvPrecision ?? DEFAULTS.kvPrecision} onChange={(value) => setInputs((current) => ({ ...current, kvPrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
-                  <SelectField label="Index precision" value={inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision} onChange={(value) => setInputs((current) => ({ ...current, indexCachePrecision: value as CachePrecision }))} options={Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
+                  <SelectField label="Index precision" value={isStep5 ? "fp8_int8" : inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision} onChange={(value) => setInputs((current) => ({ ...current, indexCachePrecision: value as CachePrecision }))} options={isStep5 ? [{ value: "fp8_int8", label: "FP8 summary（固定）" }] : Object.entries(CACHE_PRECISIONS).map(([value, item]) => ({ value, label: item.label }))} />
                 </div>
-                <p className="field-note">基于上游 kv-cache-calculator 的 {kvCacheModelId} 结构参数。</p>
+                <p className="field-note">{isStep5 ? "Step-5 官方结构本地适配：69 个 512-token 滑窗层 + 23 个 DSA 层；Index summary 按 FP8 计入。缓存按分配容量估算，不含页表等元数据。" : `基于上游 kv-cache-calculator 的 ${kvCacheModelId} 结构参数。`}</p>
               </fieldset>
             )}
 
@@ -417,10 +423,10 @@ export default function Home() {
               </div>
               {kvCacheModelId && (
                 <div className="parallel-basic">
-                  <NumberField label="MTP layers" value={inputs.mtpLayers} onChange={(v) => update("mtpLayers", v)} />
+                  <NumberField label="MTP layers" value={isStep5 ? Math.min(3, inputs.mtpLayers) : inputs.mtpLayers} onChange={(v) => update("mtpLayers", isStep5 ? String(Math.min(3, Number(v))) : v)} />
                 </div>
               )}
-              <p className="field-note">Shared Expert TP 为 1 表示不切分，不影响 EP size。</p>
+              <p className="field-note">{isStep5 ? "Step-5 官方 TP 布局下，Shared Expert TP 应与 TP size 一致；MTP 最多 3 层，均为滑窗层。" : "Shared Expert TP 为 1 表示不切分，不影响 EP size。"}</p>
               <details className="advanced-tp">
                 <summary>
                   高级切分配置
@@ -531,7 +537,7 @@ export default function Home() {
                 {weightResult && (
                   <DetailSection title="权重占用" value={result.weight} tone="rose">
                     <div className="sub-detail weight-summary">
-                      <span>全量模型 {formatGiB(result.fullWeight)}</span>
+                      <span>启用权重（全量）{formatGiB(result.fullWeight)}</span>
                       <span>当前单卡 {formatGiB(result.weight)}</span>
                       <span>{weight?.kind === "quantized" ? `Eco-Tech 量化 · ${weight.name}` : `原始权重 · ${weight?.name}`}</span>
                     </div>
@@ -560,16 +566,23 @@ export default function Home() {
                 )}
 
                 {result.kvCacheInfo && result.kvCacheBreakdown && (
-                  <DetailSection title="KV + Index Cache" value={result.kvCache} tone="cyan">
+                  <DetailSection title="KV + Index Cache" value={result.kvCache} tone="cyan" precision={3}>
                     <DetailRow
                       label={`K/V Cache（${CACHE_PRECISIONS[inputs.kvPrecision ?? DEFAULTS.kvPrecision].label}）`}
                       value={result.kvCacheBreakdown.kvCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers} + MTP ${inputs.mtpLayers} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B`}
+                      precision={3}
+                      formula={result.kvCacheBreakdown.kvFormula ?? `${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.layers} + MTP ${inputs.mtpLayers} × ${result.kvCacheBreakdown.kvCopies} × (${result.kvCacheInfo.kvHeads} ÷ TP ${result.attentionTp}) × ${result.kvCacheInfo.headDim} × ${result.kvCacheBreakdown.kvBytesPerElement} B`}
                     />
+                    {result.kvCacheBreakdown.mtpKvCache !== undefined && (
+                      <div className="sub-detail">
+                        <span>其中 MTP {result.kvCacheBreakdown.effectiveKvLayers - result.kvCacheInfo.layers} 层的 KV 增量</span>
+                        <span>{formatMiB(result.kvCacheBreakdown.mtpKvCache)}</span>
+                      </div>
+                    )}
                     <DetailRow
-                      label={`Index Cache（${CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}
+                      label={`Index Cache（${isStep5 ? "FP8 summary" : CACHE_PRECISIONS[inputs.indexCachePrecision ?? DEFAULTS.indexCachePrecision].label}）`}
                       value={result.kvCacheBreakdown.indexCache}
-                      formula={`${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.sparseLayers} × ${result.kvCacheInfo.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B`}
+                      formula={result.kvCacheBreakdown.indexFormula ?? `${inputs.kvCacheTokens ?? DEFAULTS.kvCacheTokens} × ${inputs.kvCacheSequences ?? DEFAULTS.kvCacheSequences} × ${result.kvCacheInfo.sparseLayers} × ${result.kvCacheInfo.indexHeadDim} × ${result.kvCacheBreakdown.indexBytesPerElement} B`}
                     />
                   </DetailSection>
                 )}
@@ -600,7 +613,7 @@ export default function Home() {
               </div>
             </article>
 
-            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。权重从 safetensors header 逐张量（dtype × shape）求和，全量精确；单卡按模块通用切分（专家÷EP、注意力/Embedding/LM Head÷TP、其余复制）为近似。KV Cache 仅对上游已收录的模型展示。EP 自动等于 TP × DP。</p>
+            <p className="method-note"><strong>口径说明</strong> 所有结果均为单卡估算并统一显示为 GiB。权重从 safetensors header 逐张量（dtype × shape）求和，全量精确；单卡按模块通用切分（专家÷EP、注意力/Embedding/LM Head÷TP、其余复制）为近似。KV Cache 对上游已收录的模型及本地适配的 Step-5-Preview 展示。EP 自动等于 TP × DP。</p>
           </section>
         </section>
       </div>
@@ -628,20 +641,20 @@ function SelectField({ label, value, onChange, options, disabled = false }: { la
   );
 }
 
-function DetailSection({ title, value, tone, children }: { title: string; value: number; tone: string; children: React.ReactNode }) {
+function DetailSection({ title, value, tone, children, precision = 2 }: { title: string; value: number; tone: string; children: React.ReactNode; precision?: number }) {
   return (
     <section className={`detail-section ${tone}`}>
-      <div className="detail-title"><span>{title}</span><strong>{formatGiB(value)}</strong></div>
+      <div className="detail-title"><span>{title}</span><strong>{formatGiB(value, precision)}</strong></div>
       {children}
     </section>
   );
 }
 
-function DetailRow({ label, value, formula }: { label: string; value: number; formula: string }) {
+function DetailRow({ label, value, formula, precision = 2 }: { label: string; value: number; formula: string; precision?: number }) {
   return (
     <div className="detail-row">
       <div><span>{label}</span><code>{formula}</code></div>
-      <strong>{formatCompact(value)}</strong>
+      <strong>{formatCompact(value, precision)}</strong>
     </div>
   );
 }
