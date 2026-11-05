@@ -25,11 +25,11 @@
 - 已拉取的权重清单在会话内缓存：切换权重（含切回看过的权重）复用缓存，调整 DP/TP 等并行参数只重算切分、不重复请求；分片 header 并发拉取，并按「已接收分片数 / 总分片数」实时上报进度条。
 - 支持 `w*a*` 量化权重（含 INT8/INT4 及 `mxfp8`/`mxfp4` 的 payload + scale）与原始 BF16/FP8 权重。
 - 估算激活值、HCCL buffer、ACLGraph、CANN/PTA/算子与 Device OS 开销。
-- 对 `kv-cache-calculator` 已收录的模型，独立配置 KV Cache 与 Index Cache 的上下文长度、序列数和精度。
+- 对本地适配的 Step-5-Preview 和 `kv-cache-calculator` 已收录的模型，配置 KV Cache 与 Index Cache 的上下文长度、序列数和精度。
 - 提供浅色/深色界面和响应式布局。
 
 > [!NOTE]
-> 权重显存对清单内所有权重均支持（逐张量精确）；KV Cache 与 Index Cache 仅对上游 `kv-cache-calculator` 已收录的模型（MiniMax M3/M2.7、DeepSeek V3/V3.2/V4、GLM-5/5.1/5.2、Kimi K2.5/K2.6、Qwen3 系列等）展示，其余模型暂不支持。
+> 权重显存对清单内所有权重均支持（逐张量精确）；KV Cache 与 Index Cache 对本地适配的 Step-5-Preview，以及上游 `kv-cache-calculator` 已收录的模型（MiniMax M3/M2.7、DeepSeek V3/V3.2/V4、GLM-5/5.1/5.2、Kimi K2.5/K2.6、Qwen3 系列等）展示，其余模型暂不支持。
 
 ## 核心原理
 
@@ -161,3 +161,17 @@ worker/                  # Cloudflare Worker 入口
 ## License
 
 本项目采用 [MIT License](./LICENSE) 开源。
+
+### Step-5-Preview
+
+在「Step → Step-5-Preview」中选择 `stepfun-ai/Step-5-Preview`，加载官方 FP8 权重的真实 shape、scale 与计算公式。同一模型下也可选择 `Eco-Tech/Step-5-Preview-w8a8-mxfp8`；其 MXFP8 权重与 U8 block scale 分别按实际存储 shape 计入，复用 Step-5 缓存适配。模型为 92 个主层、352 个路由专家、TopK=8、hidden size 4096；默认 TP=4、DP=8 时每卡 11 个路由专家。主干与启用的 MTP 层权重按索引指定的分片来源计入，同名旧副本不重复统计。
+
+缓存使用本地适配，依据官方 [config.json](https://modelscope.cn/models/stepfun-ai/Step-5-Preview/resolve/master/config.json)、[inference/model.py](https://modelscope.cn/models/stepfun-ai/Step-5-Preview/resolve/master/inference/model.py) 与 [inference/kernel.py](https://modelscope.cn/models/stepfun-ai/Step-5-Preview/resolve/master/inference/kernel.py)：
+
+- 69 个滑窗层各分配 512 token；23 个 DSA 层保留完整 K/V，容量向上对齐到 16 token。
+- 每卡 KV head 数为 `max(1, ceil(4 / Attention TP))`。TP 超过 4 时 KV/provider group 复制，不继续按比例缩小。
+- DSA Index Cache 按每 8 token 一份 256 维 FP8 summary 计算，在 TP 间复制。
+- MTP 最多 3 层，均为滑窗层，只增加滑窗 KV，不增加 DSA Index Cache。MTP=0 时排除全部投机层权重；设为 1/2/3 时按层编号依次计入相应层权重，并增加对应的滑窗 KV。
+- Indexer K/Z 和 `ssmax_s` 权重复用完整副本；Indexer Q/W 随 provider group 切分。官方 TP 布局的 Shared Expert TP 应与 TP size 一致，可在界面配置。
+
+缓存数值按上述分配容量估算，不含页表、长度计数器、RoPE 缓存等运行时辅助数据；部署框架采用不同缓存策略时可能不同。

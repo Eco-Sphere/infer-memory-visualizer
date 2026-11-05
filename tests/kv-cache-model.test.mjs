@@ -83,3 +83,56 @@ test("KV cache shards across TP while the index cache stays replicated", () => {
   assert.equal(tp4.kvCache, tp1.kvCache / 4);
   assert.equal(tp4.indexCache, tp1.indexCache);
 });
+
+test("Step-5 combines 69 sliding layers and 23 paged DSA layers with fixed index formats", () => {
+  assert.deepEqual(getKvCacheModelInfo("step5-preview"), {
+    layers: 92, sparseLayers: 23, kvHeads: 4, headDim: 192, indexHeadDim: 256, source: "local",
+  });
+  const input = { modelId: "step5-preview", tokens: 1024, sequences: 2, kvPrecision: "bf16_fp16", indexPrecision: "fp4_int4", tpSize: 4 };
+  const base = calculateKvCache(input);
+  assert.equal(base.kvCache, 90_439_680);
+  assert.equal(base.indexCache, 1_507_328);
+  assert.equal(base.indexBytesPerElement, 1);
+  const tp1 = calculateKvCache({ ...input, tpSize: 1 });
+  const tp8 = calculateKvCache({ ...input, tpSize: 8 });
+  assert.equal(tp1.kvCache, base.kvCache * 4);
+  assert.equal(tp8.kvCache, base.kvCache);
+  assert.equal(tp8.indexCache, base.indexCache);
+  const fp8 = calculateKvCache({ ...input, kvPrecision: "fp8_int8", indexPrecision: "bf16_fp16" });
+  assert.equal(fp8.kvCache, base.kvCache / 2);
+  assert.equal(fp8.indexCache, base.indexCache);
+});
+
+test("Step-5 MTP adds only sliding KV; DSA capacity rounds to 16-token pages", () => {
+  const input = { modelId: "step5-preview", tokens: 1024, sequences: 2, kvPrecision: "bf16_fp16", indexPrecision: "fp8_int8", tpSize: 4 };
+  const base = calculateKvCache(input);
+  const mtp = calculateKvCache({ ...input, mtpLayers: 3 });
+  assert.equal(mtp.effectiveKvLayers, 95);
+  assert.equal(mtp.effectiveIndexLayers, 23);
+  assert.equal(mtp.indexCache, base.indexCache);
+  assert.equal(mtp.kvCache - base.kvCache, 2_359_296);
+  assert.equal(mtp.mtpKvCache, 2_359_296);
+  assert.equal(calculateKvCache({ ...input, mtpLayers: 4 }).total, mtp.total);
+  const aligned = calculateKvCache({ ...input, tokens: 1040 });
+  assert.equal(calculateKvCache({ ...input, tokens: 1025 }).total, aligned.total);
+  const short = calculateKvCache({ ...input, tokens: 1, sequences: 1 });
+  assert.equal(short.kvCache, 2 * 192 * 2 * (23 * 16 + 69 * 512));
+  assert.equal(short.indexCache, 23 * 2 * 256);
+  for (const empty of [{ tokens: 0 }, { sequences: 0 }]) {
+    assert.equal(calculateKvCache({ ...input, ...empty }).total, 0);
+  }
+});
+
+
+test("Step-5 默认容量下每个 MTP 层的缓存增量在三位 GiB 显示中可见", () => {
+  const results = [0, 1, 2, 3].map(mtpLayers => calculateKvCache({
+    modelId: "step5-preview", tokens: 131072, sequences: 8,
+    kvPrecision: "fp8_int8", indexPrecision: "fp8_int8", tpSize: 4, mtpLayers,
+  }));
+  assert.deepEqual(results.map(r => (r.total / 1024 ** 3).toFixed(3)), ["9.445", "9.446", "9.448", "9.449"]);
+  for (let i = 0; i < results.length; i++) {
+    assert.equal(results[i].mtpKvCache, i * 1.5 * 1024 ** 2);
+    assert.equal(results[i].total - results[0].total, results[i].mtpKvCache);
+    assert.equal(results[i].indexCache, 8 * 23 * (131072 / 8) * 256);
+  }
+});

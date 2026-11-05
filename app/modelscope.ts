@@ -61,11 +61,11 @@ const OPTIONAL_WEIGHT_CANDIDATES = [
  * 权重分片列表无法走 ModelScope 的 repo/files 列表 API（该 API 无 CORS 头），
  * 因此改为从 index.json 的 weight_map 推导；缺失 index 时回退到单文件试探。
  */
-export async function fetchSafetensorsShards(
+async function fetchSafetensorsManifest(
   owner: string,
   name: string,
   ref = "master",
-): Promise<string[]> {
+): Promise<{ shards: string[]; weightMap?: Record<string, string> }> {
   for (const indexFile of INDEX_CANDIDATES) {
     const url = modelscopeResolveUrl(owner, name, indexFile, ref);
     let res: Response;
@@ -82,7 +82,7 @@ export async function fetchSafetensorsShards(
         const shards = Array.from(new Set(Object.values(weightMap)))
           .filter((s) => s.endsWith(".safetensors"))
           .sort();
-        if (shards.length > 0) return shards;
+        if (shards.length > 0) return { shards, weightMap };
       }
     } catch {
       // index 解析失败，继续尝试下一个候选
@@ -94,12 +94,17 @@ export async function fetchSafetensorsShards(
     const url = modelscopeResolveUrl(owner, name, single, ref);
     try {
       const res = await fetch(url, { headers: { Range: "bytes=0-7" } });
-      if (res.ok) return [single];
+      if (res.ok) return { shards: [single] };
     } catch {
       // ignore
     }
   }
   throw new Error(`无法定位 ${owner}/${name} 的 safetensors 权重分片`);
+}
+
+/** 对外保留仅返回分片列表的接口。 */
+export async function fetchSafetensorsShards(owner: string, name: string, ref = "master"): Promise<string[]> {
+  return (await fetchSafetensorsManifest(owner, name, ref)).shards;
 }
 
 /**
@@ -225,7 +230,8 @@ export function fetchModelWeightData(
     onProgress?.({ phase: "index", done: 0, total: 0 });
     const config = await fetchConfigJson(owner, name, ref);
     const struct = extractModelStructure(config);
-    const mainShards = await fetchSafetensorsShards(owner, name, ref);
+    const manifest = await fetchSafetensorsManifest(owner, name, ref);
+    const mainShards = manifest.shards;
     const optionalShards = await fetchOptionalShards(owner, name, ref);
     const shards = [...mainShards, ...optionalShards];
 
@@ -235,6 +241,10 @@ export function fetchModelWeightData(
       const header = await fetchSafetensorsHeader(owner, name, shard, ref);
       done += 1;
       onProgress?.({ phase: "shards", done, total: shards.length });
+      // 索引指定实际加载来源；某些分片保留同名旧副本，不能重复计入。
+      if (manifest.weightMap && mainShards.includes(shard)) {
+        return { ...header, tensors: header.tensors.filter((t) => manifest.weightMap![t.name] === shard) };
+      }
       return header;
     });
     const tensors = headers.flatMap((header) => header.tensors);

@@ -1,3 +1,4 @@
+import { STEP5_CACHE_INFO, calculateStep5Cache } from "./step5-cache.ts";
 import kvCacheCalculator from "kv-cache-calculator";
 import kvModelData from "kv-cache-calculator/models";
 
@@ -15,6 +16,7 @@ export type KvCacheModelInfo = {
   kvHeads: number;
   headDim: number;
   indexHeadDim: number;
+  source?: "local";
 };
 
 function findUpstreamModel(modelId: string) {
@@ -22,6 +24,7 @@ function findUpstreamModel(modelId: string) {
 }
 
 export function getKvCacheModelInfo(modelId: string): KvCacheModelInfo | undefined {
+  if (modelId === "step5-preview") return STEP5_CACHE_INFO;
   const upstream = findUpstreamModel(modelId);
   if (!upstream) return undefined;
   const fields = upstream.fields;
@@ -34,7 +37,7 @@ export function getKvCacheModelInfo(modelId: string): KvCacheModelInfo | undefin
   };
 }
 
-type KvCacheInput = {
+export type KvCacheInput = {
   modelId: string;
   tokens: number;
   sequences: number;
@@ -53,6 +56,10 @@ export type KvCacheBreakdown = {
   kvCopies: number;
   effectiveKvLayers: number;
   effectiveIndexLayers: number;
+  /** 已包含在 kvCache 中的 MTP KV 增量。 */
+  mtpKvCache?: number;
+  kvFormula?: string;
+  indexFormula?: string;
 };
 
 export function calculateKvCache({
@@ -64,6 +71,10 @@ export function calculateKvCache({
   mtpLayers = 0,
   tpSize = 1,
 }: KvCacheInput): KvCacheBreakdown | null {
+  if (modelId === "step5-preview") {
+    return calculateStep5Cache({ modelId, tokens, sequences, kvPrecision, indexPrecision, mtpLayers, tpSize },
+      (CACHE_PRECISIONS[kvPrecision] ?? CACHE_PRECISIONS.bf16_fp16).bytes);
+  }
   const upstream = findUpstreamModel(modelId);
   const info = getKvCacheModelInfo(modelId);
   if (!upstream || !info) return null;

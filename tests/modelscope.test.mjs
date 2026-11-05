@@ -182,3 +182,24 @@ test("兼容 Qwen2.5-VL 的量化索引和单文件名称", async () => {
     globalThis.fetch = original;
   }
 });
+
+test("weight_map 指定张量来源，忽略其他分片中遗留的同名副本", async () => {
+  const original = globalThis.fetch;
+  const duplicate = { dtype: "BF16", shape: [64, 64], data_offsets: [0, 8192] };
+  const first = makeHeaderFile({ "model.embed_tokens.weight": duplicate });
+  const second = makeHeaderFile({ "model.embed_tokens.weight": duplicate, "model.norm.weight": duplicate });
+  globalThis.fetch = async input => {
+    const url = String(input);
+    if (url.endsWith("config.json")) return new Response(JSON.stringify(CONFIG));
+    if (url.endsWith("model.safetensors.index.json")) return new Response(JSON.stringify({ weight_map: {
+      "model.embed_tokens.weight": "a.safetensors", "model.norm.weight": "b.safetensors",
+    } }));
+    if (url.endsWith("/a.safetensors")) return new Response(first, { status: 206 });
+    if (url.endsWith("/b.safetensors")) return new Response(second, { status: 206 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const data = await fetchModelWeightData("test-owner", "step5-duplicate-weights");
+    assert.deepEqual(data.tensors.map(t => t.name), ["model.embed_tokens.weight", "model.norm.weight"]);
+  } finally { globalThis.fetch = original; }
+});
