@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { MODEL_INDEX, QUANT_OWNER, kvCacheModelIdOf, type Vendor } from "./model-index";
 import { CACHE_PRECISIONS, calculateKvCache, getKvCacheModelInfo, type CachePrecision } from "./kv-cache-model";
 import { fetchModelWeightData, type ModelWeightData, type WeightLoadProgress } from "./modelscope";
-import { calculateWeightFromTensors, type TensorModule } from "./weight-calc";
+import { calculateWeightFromTensors, weightGroupFormula, type TensorModule } from "./weight-calc";
 
 type Inputs = {
   maxBatchedTokens: number;
@@ -61,7 +61,7 @@ const MODULE_LABEL: Record<TensorModule, string> = {
   lm_head: "LM Head",
   router: "Router",
   norm: "Norm",
-  vision: "视觉塔",
+  vision: "Vision Tower",
   other: "其他",
 };
 
@@ -536,12 +536,25 @@ export default function Home() {
                       <span>{weight?.kind === "quantized" ? `Eco-Tech 量化 · ${weight.name}` : `原始权重 · ${weight?.name}`}</span>
                     </div>
                     {Object.entries(weightResult.breakdown).filter(([, b]) => b.tensors > 0).map(([module, b]) => (
-                      <DetailRow
-                        key={module}
-                        label={`${MODULE_LABEL[module as TensorModule]}（${b.tensors} 张量）`}
-                        value={b.perDevice}
-                        formula={`全量 ${formatCompact(b.full)}，逐张量 dtype × shape 求和`}
-                      />
+                      <div className="weight-module" key={module}>
+                        <DetailRow
+                          label={`${MODULE_LABEL[module as TensorModule]}（${b.tensors} 张量）`}
+                          value={b.perDevice}
+                          formula={`全量 ${formatCompact(b.full)}；单卡 = 下列 ${b.groups.length} 组公式之和`}
+                        />
+                        <details className="weight-formulas" open>
+                          <summary>Shape 与计算公式（GiB）</summary>
+                          <p className="field-note">* 表示合并的层或专家编号；shape 为实际存储维度。</p>
+                          {b.groups.map((group, index) => (
+                            <DetailRow
+                              key={index}
+                              label={`${group.name} · ${group.dtype} · shape [${group.shape.join(", ")}]`}
+                              value={group.perDevice}
+                              formula={weightGroupFormula(group)}
+                            />
+                          ))}
+                        </details>
+                      </div>
                     ))}
                   </DetailSection>
                 )}

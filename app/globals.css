@@ -205,3 +205,7 @@ legend { margin-bottom: 10px; padding: 0; color: var(--muted); font-size: 11px; 
   .field-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+.weight-formulas { margin: 8px 0 4px 10px; padding-left: 12px; border-left: 2px solid var(--line); }
+.weight-formulas summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.weight-formulas .detail-row span { overflow-wrap: anywhere; }
