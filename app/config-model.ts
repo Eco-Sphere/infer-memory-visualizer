@@ -47,19 +47,22 @@ function num(out: Record<string, unknown>, candidates: string[]): number {
 }
 
 /**
- * 优先取 text_config 下的语言部分字段；没有 text_config 时回退顶层。
- * 做法：先整体 flatten（含 text_config.*），候选名里把 text_config 前缀放前面。
+ * 优先取 text_config / llm_config 下的语言部分字段，再回退顶层。
+ * 做法：先整体 flatten，候选名按语言配置前缀优先排列。
  */
 function langNum(
   flat: Record<string, unknown>,
   plainCandidates: string[],
   aliases: string[] = plainCandidates,
 ): number {
-  // text_config.<field> 优先，其次顶层 <field>，再其次别名。
-  const all: string[] = [];
-  for (const c of plainCandidates) all.push(`text_config.${c}`, c);
-  all.push(...aliases);
-  return num(flat, all);
+  // 主字段和别名都查找语言配置，避免多模态模型的嵌套别名漏读。
+  // 兼容 InternVL 的 llm_config；语言部分字段优先于顶层。
+  const candidates = [...new Set([...plainCandidates, ...aliases])];
+  return num(flat, [
+    ...candidates.map((c) => `text_config.${c}`),
+    ...candidates.map((c) => `llm_config.${c}`),
+    ...candidates,
+  ]);
 }
 
 export function extractModelStructure(config: Record<string, unknown>): ModelStructure {
@@ -78,7 +81,7 @@ export function extractModelStructure(config: Record<string, unknown>): ModelStr
   const kvHeads = langNum(
     flat,
     ["num_key_value_heads"],
-    ["num_kv_heads", "n_head_kv", "kv_heads"],
+    ["num_kv_heads", "n_head_kv", "kv_heads", "num_attention_groups"],
   );
   const headDim = langNum(flat, ["head_dim"], ["head_size"]);
   const vocabSize = langNum(flat, ["vocab_size"], ["padded_vocab_size"]);
@@ -97,7 +100,7 @@ export function extractModelStructure(config: Record<string, unknown>): ModelStr
   const topK = langNum(
     flat,
     ["num_experts_per_tok", "num_experts_per_token"],
-    ["top_k", "moe_topk", "num_selected_experts"],
+    ["top_k", "moe_topk", "moe_top_k", "num_selected_experts"],
   );
   const sharedExperts = langNum(flat, ["n_shared_experts"], ["num_shared_experts"]);
 

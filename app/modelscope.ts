@@ -44,6 +44,8 @@ const INDEX_CANDIDATES = [
   "model.safetensors.index.json",
   "quant_model_weights.safetensors.index.json",
   "pytorch_model.safetensors.index.json",
+  "quant_model_weight_w8a8_dynamic.safetensors.index.json",
+  "quant_model_weights.index.json",
 ];
 
 // 「可选附加权重」文件：不在 index.json 的 weight_map 里，但推理时同样会加载，
@@ -88,7 +90,7 @@ export async function fetchSafetensorsShards(
   }
 
   // 回退：尝试常见单文件权重。
-  for (const single of ["model.safetensors", "quant_model_weights.safetensors"]) {
+  for (const single of ["model.safetensors", "quant_model_weights.safetensors", "quant_model_weight_w8a8.safetensors"]) {
     const url = modelscopeResolveUrl(owner, name, single, ref);
     try {
       const res = await fetch(url, { headers: { Range: "bytes=0-7" } });

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   fetchModelWeightData,
+  fetchSafetensorsShards,
   getCachedModelWeightData,
 } from "../app/modelscope.ts";
 
@@ -132,3 +133,52 @@ function mountFetchExtra(optionalHeader) {
   });
   return () => { globalThis.fetch = original; };
 }
+
+test("发现旧版 Eco-Tech 动态量化索引，不误判为缺少权重", async () => {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async input => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/quant_model_weight_w8a8_dynamic.safetensors.index.json")) {
+      return new Response(JSON.stringify({ weight_map: {
+        "model.layers.3.mlp.experts.0.gate_proj.weight": "quant_model_weight_w8a8_dynamic-00001-of-00162.safetensors",
+        "model.layers.3.mlp.experts.1.gate_proj.weight": "quant_model_weight_w8a8_dynamic-00002-of-00162.safetensors",
+        "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "quant_model_weight_w8a8_dynamic-00001-of-00162.safetensors",
+      } }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const shards = await fetchSafetensorsShards("Eco-Tech", "DeepSeek-R1-0528-w8a8-mtp-QuaRot");
+    assert.deepEqual(shards, [
+      "quant_model_weight_w8a8_dynamic-00001-of-00162.safetensors",
+      "quant_model_weight_w8a8_dynamic-00002-of-00162.safetensors",
+    ]);
+    assert.ok(calls.every(url => url.endsWith(".index.json")), "只读取索引定位分片");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+
+test("兼容 Qwen2.5-VL 的量化索引和单文件名称", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/Qwen2.5-VL-72B-Instruct-w8a8/") && url.endsWith("/quant_model_weights.index.json")) {
+      return new Response(JSON.stringify({ weight_map: { "model.embed_tokens.weight": "quant_model_weights-00001-of-00025.safetensors" } }), { status: 200 });
+    }
+    if (url.includes("/Qwen2.5-VL-7B-Instruct-w8a8/") && url.endsWith("/quant_model_weight_w8a8.safetensors")) {
+      assert.equal(init.headers.Range, "bytes=0-7");
+      return new Response(new Uint8Array(8), { status: 206 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    assert.deepEqual(await fetchSafetensorsShards("Eco-Tech", "Qwen2.5-VL-72B-Instruct-w8a8"), ["quant_model_weights-00001-of-00025.safetensors"]);
+    assert.deepEqual(await fetchSafetensorsShards("Eco-Tech", "Qwen2.5-VL-7B-Instruct-w8a8"), ["quant_model_weight_w8a8.safetensors"]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

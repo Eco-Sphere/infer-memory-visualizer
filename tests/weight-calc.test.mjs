@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   classifyTensor,
   calculateWeightFromTensors,
+  weightGroupFormula,
 } from "../app/weight-calc.ts";
 
 test("classifyTensor 覆盖各模块命名", () => {
@@ -64,4 +65,134 @@ test("TP=EP=1 时单卡权重等于全量权重", () => {
   const r = calculateWeightFromTensors(tensors, p);
   assert.equal(r.perDeviceWeight, r.fullWeight);
   assert.equal(r.fullWeight, 12800 + 8192);
+});
+
+test("公式合并重复层与专家，保留不同 shape、dtype 与并行切分", () => {
+  const tensor = (name, dtype, shape, width) => ({
+    name, dtype, shape, bytes: shape.reduce((a, b) => a * b, 1) * width,
+  });
+  const tensors = [
+    tensor("model.layers.0.experts.0.w1.weight", "I8", [3072, 6144], 1),
+    tensor("model.layers.1.experts.127.w1.weight", "I8", [3072, 6144], 1),
+    tensor("model.layers.0.experts.0.w1.weight_scale", "F32", [3072, 1], 4),
+    tensor("model.layers.2.experts.0.w1.weight", "I8", [6144, 3072], 1),
+    tensor("model.layers.3.experts.0.w1.weight", "BF16", [3072, 6144], 2),
+    tensor("model.layers.0.self_attn.q_proj.weight", "I8", [6144, 6144], 1),
+    tensor("model.layers.0.self_attn.o_proj.weight", "I8", [6144, 6144], 1),
+    tensor("vision_tower.patch_embedding.weight", "F32", [1280, 3, 2, 14, 14], 4),
+  ];
+  const result = calculateWeightFromTensors(tensors, {
+    tp: 4, ep: 32, attentionTp: 4, oprojTp: 2,
+    embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 1,
+  });
+  const groups = result.breakdown.routed_expert.groups;
+  assert.equal(groups.length, 4);
+  assert.equal(groups[0].name, "model.layers.*.experts.*.w1.weight");
+  assert.equal(groups[0].count, 2);
+  assert.equal(weightGroupFormula(groups[0]), "2 × (3072 × 6144) × 1 B ÷ EP 32 ÷ 1024³");
+  assert.equal(weightGroupFormula(groups[1]), "1 × (3072 × 1) × 4 B ÷ EP 32 ÷ 1024³");
+  assert.deepEqual(result.breakdown.attention.groups.map(g => g.divisor), [4, 2]);
+  assert.equal(weightGroupFormula(result.breakdown.vision.groups[0]),
+    "1 × (1280 × 3 × 2 × 14 × 14) × 4 B ÷ 复制 1 ÷ 1024³");
+  for (const b of Object.values(result.breakdown)) {
+    assert.equal(b.groups.reduce((sum, g) => sum + g.count, 0), b.tensors);
+    assert.equal(b.groups.reduce((sum, g) => sum + g.full, 0), b.full);
+    assert.equal(b.groups.reduce((sum, g) => sum + g.perDevice, 0), b.perDevice);
+    for (const g of b.groups) {
+      assert.equal(g.count * g.shape.reduce((a, b) => a * b, 1) * g.bytesPerElement / g.divisor, g.perDevice);
+    }
+  }
+});
+
+
+test("Step 的打包 MoE 权重及量化辅助张量按 EP 切分，共享专家与 Router 分开", () => {
+  const tensors = [
+    { name: "model.layers.3.moe.gate_proj.weight", dtype: "I8", shape: [288, 1280, 4096], bytes: 288 * 1280 * 4096 },
+    { name: "model.layers.3.moe.up_proj.weight_scale", dtype: "F32", shape: [288, 1280, 1], bytes: 288 * 1280 * 4 },
+    { name: "model.layers.3.moe.down_proj.weight_offset", dtype: "F32", shape: [288, 4096, 1], bytes: 288 * 4096 * 4 },
+    { name: "model.layers.3.share_expert.down_proj.weight", dtype: "BF16", shape: [4096, 1280], bytes: 4096 * 1280 * 2 },
+    { name: "model.layers.3.moe.gate.weight", dtype: "F32", shape: [288, 4096], bytes: 288 * 4096 * 4 },
+    { name: "model.layers.3.moe.router_bias", dtype: "F32", shape: [288], bytes: 288 * 4 },
+    { name: "model.layers.0.mlp.down_proj.weight", dtype: "BF16", shape: [4096, 11264], bytes: 4096 * 11264 * 2 },
+  ];
+  const p = { tp: 4, ep: 32, attentionTp: 4, oprojTp: 4, embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 2 };
+  const result = calculateWeightFromTensors(tensors, p);
+  assert.equal(result.breakdown.routed_expert.tensors, 3);
+  assert.equal(result.breakdown.shared_expert.tensors, 1);
+  assert.equal(result.breakdown.router.tensors, 2);
+  assert.equal(result.breakdown.dense_mlp.tensors, 1);
+  assert.equal(result.breakdown.routed_expert.perDevice, tensors.slice(0, 3).reduce((s, t) => s + t.bytes, 0) / 32);
+  assert.equal(result.breakdown.shared_expert.perDevice, tensors[3].bytes / 2);
+  assert.equal(result.breakdown.router.perDevice, tensors[4].bytes + tensors[5].bytes);
+  assert.equal(result.breakdown.dense_mlp.perDevice, tensors[6].bytes / 4);
+  assert.ok(result.breakdown.routed_expert.groups.every(g => g.parallelism === "EP" && g.divisor === 32));
+  const full = tensors.reduce((s, t) => s + t.bytes, 0);
+  assert.equal(result.fullWeight, full);
+  const unsharded = calculateWeightFromTensors(tensors, { tp: 1, ep: 1, attentionTp: 1, oprojTp: 1, embeddingTp: 1, lmHeadTp: 1, sharedExpertTp: 1 });
+  assert.equal(unsharded.perDeviceWeight, full);
+  assert.equal(classifyTensor("model.layers.3.moe.down_proj.weight"), "routed_expert");
+  assert.equal(classifyTensor("model.layers.3.moe.shared_experts.up_proj.weight"), "shared_expert");
+  assert.equal(classifyTensor("model.layers.3.moe.norm.weight"), "norm");
+});
+
+test("公共 latent MoE 投影/Norm 与 Router expert_bias 不按 EP 切分", () => {
+  const tensors = [
+    { name: "model.layers.0.mlp.routed_expert_down_proj.weight", dtype: "BF16", shape: [3584, 7168], bytes: 3584 * 7168 * 2 },
+    { name: "model.layers.0.mlp.routed_expert_up_proj.weight_scale", dtype: "F32", shape: [7168, 1], bytes: 7168 * 4 },
+    { name: "model.layers.0.mlp.routed_expert_norm.weight", dtype: "BF16", shape: [3584], bytes: 3584 * 2 },
+    { name: "model.layers.0.mlp.gate.expert_bias", dtype: "F32", shape: [256], bytes: 256 * 4 },
+    { name: "model.layers.0.mlp.experts.0.gate_proj.weight", dtype: "BF16", shape: [3072, 3584], bytes: 3072 * 3584 * 2 },
+  ];
+  const p = { tp: 4, ep: 32, attentionTp: 4, oprojTp: 4, embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 1 };
+  const r = calculateWeightFromTensors(tensors, p);
+  assert.deepEqual(tensors.map(t => classifyTensor(t.name)), ["dense_mlp", "dense_mlp", "norm", "router", "routed_expert"]);
+  assert.equal(r.breakdown.dense_mlp.perDevice, (tensors[0].bytes + tensors[1].bytes) / 4);
+  assert.equal(r.breakdown.norm.perDevice, tensors[2].bytes);
+  assert.equal(r.breakdown.router.perDevice, tensors[3].bytes);
+  assert.equal(r.breakdown.routed_expert.perDevice, tensors[4].bytes / 32);
+});
+
+test("Hy3 共享 MLP、Qwen 共享门控和 DeepSeek V4 短名称分类", () => {
+  const cases = [
+    ["language_model.model.layers.0.block_sparse_moe.routed_expert_down_proj.weight", "dense_mlp"],
+    ["language_model.model.layers.0.block_sparse_moe.routed_expert_up_proj.weight", "dense_mlp"],
+    ["language_model.model.layers.0.block_sparse_moe.routed_expert_norm.weight", "norm"],
+    ["model.layers.0.mlp.shared_mlp.gate_proj.weight", "shared_expert"],
+    ["model.layers.0.mlp.shared_mlp.up_proj.weight_scale", "shared_expert"],
+    ["model.layers.0.mlp.shared_mlp.down_proj.weight_offset", "shared_expert"],
+    ["model.layers.0.mlp.expert_bias", "router"],
+    ["model.language_model.layers.0.mlp.shared_expert_gate.weight", "router"],
+    ["mtp.layers.0.mlp.shared_expert_gate.weight_scale", "router"],
+    ["embed.weight", "embedding"],
+    ["mtp.0.emb.tok_emb.weight", "embedding"],
+    ["head.weight", "lm_head"],
+    ["mtp.0.head.weight", "lm_head"],
+    ["model.layers.0.shared_head.head.weight", "lm_head"],
+    ["model.layers.0.transformer.shared_head.output.weight", "lm_head"],
+    ["model.layers.0.shared_head.norm.weight", "norm"],
+    ["vision_model.head.weight", "vision"],
+  ];
+  for (const [name, expected] of cases) assert.equal(classifyTensor(name), expected, name);
+  const tensors = cases.slice(3, 10).map(([name]) => ({ name, dtype: "BF16", shape: [64, 64], bytes: 8192 }));
+  const r = calculateWeightFromTensors(tensors, {
+    tp: 4, ep: 32, attentionTp: 4, oprojTp: 4, embeddingTp: 2, lmHeadTp: 4, sharedExpertTp: 8,
+  });
+  assert.equal(r.breakdown.shared_expert.perDevice, 3 * 8192 / 8);
+  assert.equal(r.breakdown.router.perDevice, 3 * 8192);
+  assert.equal(r.breakdown.embedding.perDevice, 8192 / 2);
+});
+
+
+test("Ling/Ring attention.dense 及其量化 scale 使用 O-Proj TP", () => {
+  const tensors = [
+    { name: "model.layers.0.attention.dense.weight", dtype: "BF16", shape: [64, 64], bytes: 8192 },
+    { name: "model.layers.0.attention.dense.weight_scale", dtype: "F32", shape: [64, 1], bytes: 256 },
+    { name: "model.layers.0.attention.query_key_value.weight", dtype: "BF16", shape: [192, 64], bytes: 24576 },
+  ];
+  const r = calculateWeightFromTensors(tensors, {
+    tp: 4, ep: 32, attentionTp: 4, oprojTp: 2, embeddingTp: 4, lmHeadTp: 4, sharedExpertTp: 1,
+  });
+  assert.equal(r.breakdown.attention.perDevice, (8192 + 256) / 2 + 24576 / 4);
+  assert.deepEqual(r.breakdown.attention.groups.map(g => g.parallelism), ["O-Proj TP", "O-Proj TP", "Attention TP"]);
+  assert.equal(classifyTensor("model.layers.0.mlp.dense.weight"), "dense_mlp");
 });
